@@ -1,0 +1,22 @@
+{
+  "shotID": "fixture-2026-04-20-003",
+  "captureTime": "2026-04-20T14:26:02Z",
+  "club": "PW",
+  "ballSpeedMps": 51.0,
+  "launchAngleDeg": 26.4,
+  "launchDirectionDeg": -0.4,
+  "backSpinRpm": 9120,
+  "sideSpinRpm": -80,
+  "spinAxisDeg": -0.5,
+  "carryDistanceM": 108.2,
+  "totalDistanceM": 110.0,
+  "peakHeightM": 27.8,
+  "descentAngleDeg": 51.6,
+  "clubSpeedMps": 31.4,
+  "smashFactor": 1.624,
+  "clubPathDeg": 0.6,
+  "faceAngleDeg": 0.2,
+  "attackAngleDeg": -4.4,
+  "impactLocationXmm": 0.0,
+  "impactLocationYmm": -2.4
+}
