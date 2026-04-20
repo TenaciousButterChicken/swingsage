@@ -1,0 +1,20 @@
+[project]
+name = "swingsage"
+version = "0.1.0"
+description = "Local AI Golf Coach (Swing EZ Clone) — RTX 5080 GPU-accelerated swing analysis"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+readme = "README.md"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "PL"]
+ignore = ["E501", "PLR2004"]
