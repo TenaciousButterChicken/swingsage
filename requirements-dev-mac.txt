@@ -1,0 +1,17 @@
+# Mac development dependencies — CPU only, no CUDA.
+# Use for writing code and running smoke tests against fixture data.
+
+-r requirements-base.txt
+
+# CPU-only PyTorch from default index (works on macOS arm64)
+torch==2.10.0
+torchvision==0.25.0
+
+# Image / video utilities for fixture generation
+opencv-python==4.11.0.86
+numpy==2.1.3
+
+# Test + lint
+pytest==8.4.1
+pytest-cov==6.0.0
+ruff==0.13.0
