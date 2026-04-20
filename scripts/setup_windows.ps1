@@ -8,21 +8,23 @@ $RepoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $RepoRoot
 
 # ─── Python check ─────────────────────────────────────────────────────
-$python = "python"
-$ver = & $python --version 2>&1
+# Use the py launcher to pin to 3.12, since bare `python` on PATH may be 3.10.
+$pyLauncher = @("py", "-3.12")
+$ver = & $pyLauncher[0] $pyLauncher[1] --version 2>&1
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "ERROR: python not on PATH. Install Python 3.12 from python.org." -ForegroundColor Red
+    Write-Host "ERROR: Python 3.12 not found via py launcher. Install Python 3.12 from python.org." -ForegroundColor Red
     exit 1
 }
 Write-Host "Found: $ver"
 if ($ver -notmatch "Python 3\.(1[2-9]|[2-9]\d)") {
-    Write-Host "WARNING: Python 3.12+ recommended for cu128 Blackwell support." -ForegroundColor Yellow
+    Write-Host "ERROR: Python 3.12+ required for cu128 Blackwell support. Found $ver." -ForegroundColor Red
+    exit 1
 }
 
 # ─── venv ─────────────────────────────────────────────────────────────
 if (-not (Test-Path ".venv")) {
-    Write-Host "Creating .venv..."
-    & $python -m venv .venv
+    Write-Host "Creating .venv with Python 3.12..."
+    & $pyLauncher[0] $pyLauncher[1] -m venv .venv
 }
 & ".\.venv\Scripts\Activate.ps1"
 python -m pip install --upgrade pip
