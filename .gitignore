@@ -205,3 +205,54 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# ─── SwingSage additions ──────────────────────────────────────────────
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# Node (for future Tauri/UI work)
+node_modules/
+.next/
+.turbo/
+dist/
+build/
+
+# IDEs
+.vscode/
+.idea/
+
+# Project runtime artifacts
+data/runtime/
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# Model weights and large binary assets (download via scripts, never commit)
+weights/
+*.pth
+*.pth.tar
+*.onnx
+*.safetensors
+~/.cache/4DHumans/
+
+# Sample videos — keep <5MB synthetic test patterns; never commit real swing footage
+tests/fixtures/videos/*.mp4
+tests/fixtures/videos/*.mov
+!tests/fixtures/videos/sample_synthetic.mp4
+
+# Local env
+.env
+.env.local
+
