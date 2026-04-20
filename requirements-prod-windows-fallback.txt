@@ -1,0 +1,24 @@
+# FALLBACK Windows requirements — use ONLY if requirements-prod-windows.txt fails.
+#
+# When to use:
+#   - PyTorch 2.10 stable cu128 fails to detect RTX 5080
+#   - "no kernel image available" errors persist on sm_120
+#   - MMCV refuses to build against PyTorch 2.10
+#
+# Strategy: drop to PyTorch nightly cu128, which is the original working path
+# documented by the community before stable cu128 sm_120 support landed.
+#
+#   pip install --pre torch torchvision torchaudio \
+#       --index-url https://download.pytorch.org/whl/nightly/cu128
+#
+# Nightly versions move; do NOT pin. Check `pip freeze` after install
+# and record the resolved versions in HANDOFF.md.
+
+-r requirements-base.txt
+
+opencv-python==4.11.0.86
+numpy==2.1.3
+av==13.1.0
+
+ollama==0.4.4
+pytest==8.4.1

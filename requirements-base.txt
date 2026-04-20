@@ -1,0 +1,5 @@
+# SwingSage shared dependencies (all platforms, all phases).
+# Pin exact versions for reproducibility. Update via pip-compile.
+
+watchdog==6.0.0
+python-dotenv==1.0.1
