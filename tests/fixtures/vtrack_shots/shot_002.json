@@ -1,0 +1,22 @@
+{
+  "shotID": "fixture-2026-04-20-002",
+  "captureTime": "2026-04-20T14:24:55Z",
+  "club": "Driver",
+  "ballSpeedMps": 74.8,
+  "launchAngleDeg": 12.1,
+  "launchDirectionDeg": 2.3,
+  "backSpinRpm": 2640,
+  "sideSpinRpm": 480,
+  "spinAxisDeg": 4.1,
+  "carryDistanceM": 248.0,
+  "totalDistanceM": 271.6,
+  "peakHeightM": 31.2,
+  "descentAngleDeg": 38.4,
+  "clubSpeedMps": 51.3,
+  "smashFactor": 1.458,
+  "clubPathDeg": -2.4,
+  "faceAngleDeg": 1.1,
+  "attackAngleDeg": 2.8,
+  "impactLocationXmm": -3.2,
+  "impactLocationYmm": 1.8
+}
