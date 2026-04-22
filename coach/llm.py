@@ -41,13 +41,19 @@ and "why" (string, 1 sentence linking the drill to a specific metric).
   "confidence": "low" | "medium" | "high" — how much the data supports the \
 diagnosis (low if any key metric is null or the kinematic window is too short).
 
+All rotations in "at_top" are reported as unsigned magnitudes.
+
 Reference ranges (amateur → pro):
-  Shoulder turn at top: 80–100 degrees
-  Hip turn at top: 40–55 degrees
-  X-factor at top: 35–50 degrees (bigger = more power if controlled)
-  Spine tilt forward at address: 25–40 degrees
-  Lead arm abduction at top: 160–180 degrees (closer to 180 = straighter arm)
-  Kinematic sequence: pelvis → chest → lead_arm → lead_wrist (ground up)
+  shoulder_turn_deg at top: 80-100 (magnitude of rotation from address)
+  hip_turn_deg at top: 40-55
+  x_factor_deg at top: 35-50 (bigger = more power if controlled)
+  spine_tilt_forward_deg at address: 25-40 (positive = bent toward ball)
+  lead_arm_abduction_deg at top: 80-110 (shoulder elevation; ~90 = arm horizontal; NOT straightness)
+  lead_arm_flex_deg at top: 160-180 (elbow extension; 180 = fully straight arm)
+  Kinematic sequence: pelvis -> chest -> lead_arm -> lead_wrist (ground up)
+
+Confidence guidance: set "low" if any required field is null; "medium" if
+kinematic_sequence.order_correct is false; otherwise "high".
 """
 
 
