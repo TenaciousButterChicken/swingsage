@@ -88,44 +88,111 @@ this project. When Phase 2 starts:
 
 Every successful resolve gets snapshotted to `windows-resolved.txt`.
 
-### 5. 4D-Humans (Phase 3 only)
+### 5. SwingNet + NLF (Phase 2)
 
-Install from source per upstream README — not on PyPI:
-
-```powershell
-git clone https://github.com/shubham-goel/4D-Humans.git
-cd 4D-Humans
-pip install -e .[all]
-```
-
-Weights auto-download to `~/.cache/4DHumans` on first run. **No SMPL
-registration needed** for joint-position output (we don't render meshes).
-If you ever want `.obj` mesh output, you'll need to register at
-smpl.is.tue.mpg.de and place the model files manually.
-
-### 6. Ollama + LLM (Phase 4 only)
+Both live under `third_party/`, gitignored. Clone once, then download
+weights.
 
 ```powershell
-winget install Ollama.Ollama
-ollama pull qwen2.5:14b-instruct-q4_K_M
-ollama run qwen2.5:14b-instruct-q4_K_M "Say hello"
+mkdir third_party
+git clone --depth 1 https://github.com/wmcnally/golfdb.git   third_party/golfdb
+git clone --depth 1 https://github.com/isarandi/nlf.git       third_party/nlf
+
+# SwingNet pretrained weights (Google Drive, ~63 MB)
+pip install gdown
+cd third_party/golfdb/models
+python -m gdown 1MBIDwHSM8OKRbxS8YfyRLnUBAdt0nupW -O swingnet_1800.pth.tar
+cd ../../..
+
+# NLF multi-person TorchScript weights (GitHub Release, ~493 MB)
+mkdir third_party/nlf/weights
+cd third_party/nlf/weights
+gh release download v0.3.2 --repo isarandi/nlf --pattern "nlf_l_multi_0.3.2.torchscript"
 ```
 
-`pip install ollama` is already in `requirements-prod-windows.txt`.
+Known quirks fixed in our wrappers (`inference/swing_events.py` and
+`inference/pose_3d.py`):
+- `golfdb/model.py:17` calls `torch.load('mobilenet_v2.pth.tar')` unconditionally
+  before the `pretrain` guard. Our SwingNet wrapper monkey-patches `torch.load`
+  to no-op on that path so we don't need the 14 MB backbone file.
+- NLF's TorchScript model references `torchvision::nms`. `torchvision` MUST
+  be imported before `torch.jit.load` so the op is registered. Our wrapper
+  does this at module-load time.
+- NLF steady-state is ~150 ms/frame on RTX 5080 at 492×354. First call takes
+  ~15 s for JIT kernel compile — that's normal.
 
-## LLM model sizing — why 14B over 32B
+### 6. LM Studio + Qwen 3 14B (Phase 2)
 
-- **Qwen 2.5 14B Q4_K_M** ≈ 9 GB → fits fully in 16 GB VRAM with headroom for
-  KV cache → **60-65 tok/s** on RTX 5080 (extrapolated from RTX 5070 Ti
-  benchmarks, same Blackwell arch, similar bandwidth).
-- **Qwen 2.5 32B Q4_K_M** ≈ 22-24 GB → exceeds 16 GB → spills to system RAM →
-  **~5-10 tok/s**, plus latency hit from PCIe transfers.
-- Coaching prompts are short structured-metric → natural-language tasks. 14B
-  is more than smart enough; the bottleneck for "feels live" is tokens/sec, not
-  reasoning depth.
+LM Studio replaced Ollama as of Phase 2 — the NVIDIA-partnered CUDA 12.8
+runtime gets ~27% more throughput on Blackwell, and Qwen 3 14B's IFEval /
+MMLU-Pro scores beat Qwen 2.5 32B at a fraction of the VRAM.
 
-If quality ever feels insufficient, swap for `qwen2.5:14b-instruct-q5_K_M`
-(~10.5 GB, slightly smarter, still fits) before climbing to 32B.
+```powershell
+# install (silent, accepts license)
+winget install --id ElementLabs.LMStudio --exact `
+    --accept-source-agreements --accept-package-agreements --silent
+
+# Run the GUI once to bootstrap ~/.lmstudio/ (required — lms CLI needs it).
+# Click "Skip for now" on the first-model screen; leave Developer Mode ON.
+& "$env:LOCALAPPDATA\Programs\LM Studio\LM Studio.exe"
+
+# Download Qwen 3 14B Q5_K_M (~10.5 GB)
+$lms = "$HOME\.lmstudio\bin\lms.exe"
+& $lms get "https://huggingface.co/bartowski/Qwen_Qwen3-14B-GGUF@Q5_K_M" -y --gguf
+
+# Start server + load model (full GPU offload, 16K context)
+& $lms server start --port 1234
+& $lms load qwen_qwen3-14b --gpu max --context-length 16384 --identifier qwen3-14b -y
+```
+
+Configure `.env`:
+
+```
+SWINGSAGE_LLM_MODEL=qwen3-14b
+SWINGSAGE_LLM_API_BASE=http://127.0.0.1:1234/v1
+```
+
+`openai>=1.50` is installed by the coach module's one-shot install; add
+it to `requirements-prod-windows.txt` on the next sweep.
+
+## Phase 2 pipeline — run it
+
+```powershell
+.\.venv\Scripts\python.exe scripts\analyze_swing.py third_party\golfdb\test_video.mp4
+```
+
+Outputs:
+1. 8 SwingNet event frames + confidences (~1 s)
+2. NLF 3D pose per frame (~30-60 s for a 200-frame clip, 0.5-1 GB VRAM)
+3. Biomechanics payload: spine tilt, shoulder/hip/x-factor rotations,
+   lead-arm abduction + flex, kinematic-sequence peak-velocity ordering
+4. Qwen 3 14B JSON coaching: faults, diagnosis, drills, confidence
+   (~3 s at 45 tok/s, 10 GB VRAM for the LLM)
+
+CV and LLM VRAM don't overlap in the current flow — CV runs to completion
+then Qwen loads. Peak simultaneous usage is ~1 GB (CV) then ~10 GB (LLM).
+
+## LLM model sizing — why Qwen 3 14B over 32B
+
+- **Qwen 3 14B Q5_K_M** ≈ 10.5 GB → fits with 16K context, ~45 tok/s on RTX 5080.
+- **Qwen 3 32B Q4_K_M** ≈ 19 GB → spills to RAM, slow, and Q3 quant damage is significant.
+- **Qwen 3 30B-A3B MoE Q4_K_M** ≈ 17 GB → tight fit but only 3B params active per
+  token, so still 60+ tok/s. Worth swapping to if recall ever feels thin.
+- IFEval + MMLU-Pro both jumped materially 2.5 → 3; the coaching prompt's
+  schema-strict JSON output stresses IFEval, which is exactly where Qwen 3
+  improved the most.
+
+## Blackwell sm_120 gotchas (hit and cataloged)
+
+| Issue | Impact on us | Resolution |
+|---|---|---|
+| `torch.load('mobilenet_v2.pth.tar')` in golfdb model.py | SwingNet crashes at init | Monkey-patch torch.load in our wrapper |
+| `torchvision::nms` not registered | NLF TorchScript fails to load | `import torchvision` before `torch.jit.load` |
+| Pip download timeouts (hotspot) | PyTorch 2.10 cu128 fails mid-install | `--timeout 120 --retries 20` |
+| LM Studio `response_format: json_object` rejected | OpenAI SDK 400 | Use `json_schema` instead |
+| Windows cp1252 console crash on Qwen's Unicode arrows | smoke test dies | `sys.stdout.reconfigure(encoding='utf-8', errors='replace')` |
+| NLF gravity estimate biased by bent-over Address | spine_tilt ~2° instead of ~30° | Hard-code up = -Y (NLF camera frame) |
+| Setup script exits 0 on pip failures | Silent install breakage | Known. Worth fixing in `setup_windows.ps1` on next pass |
 
 ## VTrack hardware status on this Windows box (as of 2026-04-22)
 
