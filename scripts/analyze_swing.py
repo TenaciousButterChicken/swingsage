@@ -104,6 +104,53 @@ def _crop_frames_to_person(
     return [f[y1:y2, x1:x2] for f in bgr_frames]
 
 
+def _save_trim_artifacts(
+    video_path: Path,
+    cropped_frames: list,
+    fps: float,
+    window_start_orig: int,
+    peak_shoulder_orig: int,
+    impact_orig: int,
+    window_end_orig: int,
+) -> Path:
+    """Write the trimmed+cropped clip and keyframe JPGs so the user can
+    verify what SwingNet/metrics actually saw. Returns the output directory.
+
+    All saved files go into `captures/<video-basename>_trim/`:
+      - trimmed.mp4: the full cropped window at the source fps
+      - keyframe_*.jpg: window start, peak-shoulder (metric "Top"), impact, window end
+    """
+    out_dir = Path("captures") / f"{video_path.stem}_trim"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if not cropped_frames:
+        return out_dir
+    h, w = cropped_frames[0].shape[:2]
+    mp4_path = out_dir / "trimmed.mp4"
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    writer = cv2.VideoWriter(str(mp4_path), fourcc, fps, (w, h))
+    try:
+        for f in cropped_frames:
+            writer.write(f)
+    finally:
+        writer.release()
+
+    # Keyframes use original-video frame numbers in the filename so they
+    # match what the CLI output shows.
+    def _save_frame_at(label: str, original_frame: int) -> None:
+        window_rel = original_frame - window_start_orig
+        if window_rel < 0 or window_rel >= len(cropped_frames):
+            return
+        jpg_path = out_dir / f"keyframe_{label}_f{original_frame:04d}.jpg"
+        cv2.imwrite(str(jpg_path), cropped_frames[window_rel])
+
+    _save_frame_at("window_start", window_start_orig)
+    _save_frame_at("peak_shoulder_top", peak_shoulder_orig)
+    _save_frame_at("impact", impact_orig)
+    _save_frame_at("window_end", window_end_orig - 1)
+    return out_dir
+
+
 def _remap_events(events: SwingEvents, offset: int) -> SwingEvents:
     """Shift event frame indices from window-relative to original-video timeline."""
     if offset == 0:
@@ -134,6 +181,7 @@ def run(
     skip_llm: bool = False,
     rotation: int | None = None,
     auto_trim: bool = True,
+    save_trimmed: bool = False,
 ) -> int:
     _utf8_stdout()
     rot = rotation  # None = auto-detect from metadata
@@ -216,6 +264,18 @@ def run(
     payload = _remap_payload_frames(payload, offset=window.start)
     print(json.dumps(payload, indent=2))
 
+    if save_trimmed:
+        out_dir = _save_trim_artifacts(
+            video_path=video,
+            cropped_frames=cropped_frames,
+            fps=fps,
+            window_start_orig=window.start,
+            peak_shoulder_orig=m.peak_shoulder_frame + window.start,
+            impact_orig=impact_rel + window.start,
+            window_end_orig=window.end,
+        )
+        print(f"\n  [saved] trim artifacts -> {out_dir}/")
+
     if skip_llm:
         print("\nLLM skipped (--no-llm)")
         return 0
@@ -259,6 +319,11 @@ def main() -> None:
         action="store_false",
         help="Analyze the full clip verbatim instead of auto-locating the swing window.",
     )
+    parser.add_argument(
+        "--save-trimmed",
+        action="store_true",
+        help="Write the trimmed+cropped clip and keyframe JPGs to captures/<video>_trim/ so you can visually verify the auto-trim.",
+    )
     args = parser.parse_args()
     sys.exit(run(
         args.video,
@@ -266,6 +331,7 @@ def main() -> None:
         skip_llm=args.no_llm,
         rotation=args.rotate,
         auto_trim=args.auto_trim,
+        save_trimmed=args.save_trimmed,
     ))
 
 
