@@ -108,79 +108,69 @@ def load_model(device: torch.device | str | None = None) -> torch.nn.Module:
     return net
 
 
-def _read_and_preprocess(
-    video_path: Path,
-    rotation: Rotation | None = None,
-) -> np.ndarray:
-    """Read video → letterboxed 160x160 RGB frames, normalized to ImageNet stats.
+def _preprocess_bgr_frames(bgr_frames: list[np.ndarray]) -> np.ndarray:
+    """Letterbox a list of BGR uint8 frames into (T, 3, 160, 160) float32 tensor.
 
-    Applies container/metadata rotation (or an explicit override) BEFORE
-    letterbox-resize, since the aspect ratio depends on the post-rotation
-    dimensions. Returns float32 array of shape (T, 3, 160, 160).
+    Input frames must already be rotation-corrected. Uses the first frame's
+    dimensions to size the letterbox, so all frames in the list must share
+    shape (they will if they came from the same video).
     """
-    cap, rot = open_video(video_path, rotation=rotation)
-    try:
-        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        if not total:
-            raise ValueError(f"Video has zero frames: {video_path}")
+    if not bgr_frames:
+        raise ValueError("bgr_frames is empty — nothing to preprocess")
 
-        # Probe one frame post-rotation so letterbox math matches the final geometry.
-        ok, first = cap.read()
-        if not ok:
-            raise ValueError(f"Could not read first frame: {video_path}")
-        first = apply_rotation(first, rot)
-        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)  # rewind
-        h, w = first.shape[:2]
+    h, w = bgr_frames[0].shape[:2]
+    ratio = _INPUT_SIZE / max(h, w)
+    new_h, new_w = int(h * ratio), int(w * ratio)
+    pad_w = _INPUT_SIZE - new_w
+    pad_h = _INPUT_SIZE - new_h
+    top, bottom = pad_h // 2, pad_h - pad_h // 2
+    left, right = pad_w // 2, pad_w - pad_w // 2
 
-        ratio = _INPUT_SIZE / max(h, w)
-        new_h, new_w = int(h * ratio), int(w * ratio)
-        pad_w = _INPUT_SIZE - new_w
-        pad_h = _INPUT_SIZE - new_h
-        top, bottom = pad_h // 2, pad_h - pad_h // 2
-        left, right = pad_w // 2, pad_w - pad_w // 2
+    out: list[np.ndarray] = []
+    for img in bgr_frames:
+        resized = cv2.resize(img, (new_w, new_h))
+        bordered = cv2.copyMakeBorder(
+            resized, top, bottom, left, right,
+            cv2.BORDER_CONSTANT, value=_BORDER_BGR,
+        )
+        rgb = cv2.cvtColor(bordered, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+        out.append(rgb)
 
-        frames: list[np.ndarray] = []
-        for _ in range(total):
-            ok, img = cap.read()
-            if not ok:
-                break
-            img = apply_rotation(img, rot)
-            resized = cv2.resize(img, (new_w, new_h))
-            bordered = cv2.copyMakeBorder(
-                resized, top, bottom, left, right,
-                cv2.BORDER_CONSTANT, value=_BORDER_BGR,
-            )
-            rgb = cv2.cvtColor(bordered, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
-            frames.append(rgb)
-    finally:
-        cap.release()
-
-    arr = np.stack(frames, axis=0)  # (T, H, W, 3)
+    arr = np.stack(out, axis=0)                         # (T, H, W, 3)
     arr = (arr - _IMAGENET_MEAN) / _IMAGENET_STD
     arr = arr.transpose(0, 3, 1, 2).astype(np.float32)  # (T, 3, H, W)
     return arr
 
 
-def detect_events(
-    video_path: str | Path,
-    model: torch.nn.Module | None = None,
-    seq_length: int = 64,
-    device: torch.device | str | None = None,
+def _read_and_preprocess(
+    video_path: Path,
     rotation: Rotation | None = None,
+) -> np.ndarray:
+    """Read video → letterboxed 160x160 RGB frames. Thin wrapper over _preprocess_bgr_frames."""
+    cap, rot = open_video(video_path, rotation=rotation)
+    try:
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if not total:
+            raise ValueError(f"Video has zero frames: {video_path}")
+        bgr_frames: list[np.ndarray] = []
+        for _ in range(total):
+            ok, img = cap.read()
+            if not ok:
+                break
+            bgr_frames.append(apply_rotation(img, rot))
+    finally:
+        cap.release()
+    return _preprocess_bgr_frames(bgr_frames)
+
+
+def _run_swingnet(
+    preprocessed: np.ndarray,
+    model: torch.nn.Module,
+    seq_length: int,
 ) -> SwingEvents:
-    """Run SwingNet over a full video and return 8 event-frame indices + confidences.
-
-    The model predicts per-frame probabilities over 9 classes (8 events + "no event").
-    Each event's frame is the argmax of its probability column — this is the
-    standard GolfDB evaluation protocol.
-    """
-    video_path = Path(video_path)
-    if model is None:
-        model = load_model(device=device)
-
+    """Run the SwingNet model on a pre-letterboxed (T, 3, 160, 160) tensor."""
     device_t = next(model.parameters()).device
-    frames = _read_and_preprocess(video_path, rotation=rotation)  # (T, 3, 160, 160)
-    t = torch.from_numpy(frames).unsqueeze(0)  # (1, T, 3, 160, 160)
+    t = torch.from_numpy(preprocessed).unsqueeze(0)  # (1, T, 3, 160, 160)
     total_frames = t.shape[1]
 
     probs_chunks: list[np.ndarray] = []
@@ -199,6 +189,44 @@ def detect_events(
         frames=tuple(int(f) for f in event_frames),
         confidences=tuple(confidences),
     )
+
+
+def detect_events_from_frames(
+    bgr_frames: list[np.ndarray],
+    model: torch.nn.Module | None = None,
+    seq_length: int = 64,
+    device: torch.device | str | None = None,
+) -> SwingEvents:
+    """Run SwingNet on already-decoded, already-rotated BGR frames.
+
+    Use this path when the pipeline has already loaded the video for NLF — it
+    lets SwingNet and NLF share one decode. Frame indices in the returned
+    `SwingEvents` are relative to the input list.
+    """
+    if model is None:
+        model = load_model(device=device)
+    preprocessed = _preprocess_bgr_frames(bgr_frames)
+    return _run_swingnet(preprocessed, model, seq_length)
+
+
+def detect_events(
+    video_path: str | Path,
+    model: torch.nn.Module | None = None,
+    seq_length: int = 64,
+    device: torch.device | str | None = None,
+    rotation: Rotation | None = None,
+) -> SwingEvents:
+    """Run SwingNet over a full video and return 8 event-frame indices + confidences.
+
+    The model predicts per-frame probabilities over 9 classes (8 events + "no event").
+    Each event's frame is the argmax of its probability column — this is the
+    standard GolfDB evaluation protocol.
+    """
+    video_path = Path(video_path)
+    if model is None:
+        model = load_model(device=device)
+    preprocessed = _read_and_preprocess(video_path, rotation=rotation)  # (T, 3, 160, 160)
+    return _run_swingnet(preprocessed, model, seq_length)
 
 
 if __name__ == "__main__":
