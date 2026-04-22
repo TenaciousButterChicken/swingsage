@@ -41,6 +41,12 @@ and "why" (string, 1 sentence linking the drill to a specific metric).
   "confidence": "low" | "medium" | "high" — how much the data supports the \
 diagnosis (low if any key metric is null or the kinematic window is too short).
 
+All "at_top" and "at_address" metrics are computed as extrema/medians across
+the appropriate swing phase (e.g., peak |shoulder rotation| over the backswing,
+median spine tilt over the pre-takeaway setup). They are NOT sampled at a single
+event frame, so they are insensitive to small event-localization errors and
+you can trust them even when a specific event frame would be off by a few frames.
+
 All rotations in "at_top" are reported as unsigned magnitudes.
 
 Reference ranges (amateur → pro):
