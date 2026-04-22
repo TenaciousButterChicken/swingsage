@@ -16,10 +16,16 @@ import sys
 import time
 from pathlib import Path
 
-from analytics.joint_angles import compute_metrics, metrics_to_coach_dict
-from coach.llm import CoachClient
-from inference.pose_3d import predict_video
-from inference.swing_events import detect_events
+# When invoked as `python scripts/analyze_swing.py ...` the repo root isn't on
+# sys.path. Fix that before our imports so direct CLI invocation works.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from analytics.joint_angles import compute_metrics, metrics_to_coach_dict  # noqa: E402
+from coach.llm import CoachClient  # noqa: E402
+from inference.pose_3d import predict_video  # noqa: E402
+from inference.swing_events import detect_events  # noqa: E402
 
 
 def _utf8_stdout() -> None:
