@@ -36,19 +36,32 @@ def _utf8_stdout() -> None:
             pass
 
 
-def run(video: Path, handedness: str = "right", skip_llm: bool = False) -> int:
+def run(
+    video: Path,
+    handedness: str = "right",
+    skip_llm: bool = False,
+    rotation: int | None = None,
+) -> int:
     _utf8_stdout()
+    rot = rotation  # forwarded to inference modules; None = auto-detect from metadata
 
     print(f"[1/4] SwingNet event detection on {video}")
+    if rot is not None:
+        print(f"  (rotation override: {rot}°)")
     t0 = time.perf_counter()
-    events = detect_events(video)
+    events = detect_events(video, rotation=rot)
     print(f"  done in {time.perf_counter() - t0:.1f}s")
     for name, frame, conf in zip(events.names, events.frames, events.confidences):
         print(f"    {name:22s}  frame {frame:4d}  conf {conf:.3f}")
 
+    if max(events.confidences) < 0.1:
+        print("  WARNING: all event confidences < 0.1 — SwingNet did not")
+        print("  recognize this clip. Common causes: sideways phone video")
+        print("  (try --rotate 90), single-swing missing, golfer not framed.")
+
     print("\n[2/4] NLF 3D pose (per-frame)")
     t0 = time.perf_counter()
-    frames = predict_video(video, verbose=True)
+    frames = predict_video(video, verbose=True, rotation=rot)
     detected = sum(1 for f in frames if f.detected)
     print(f"  done in {time.perf_counter() - t0:.1f}s, {detected}/{len(frames)} detected")
 
@@ -88,8 +101,20 @@ def main() -> None:
     parser.add_argument("video", type=Path)
     parser.add_argument("--handedness", choices=("right", "left"), default="right")
     parser.add_argument("--no-llm", action="store_true", help="Skip the coaching step")
+    parser.add_argument(
+        "--rotate",
+        type=int,
+        choices=(0, 90, 180, 270),
+        default=None,
+        help="Rotate frames by this many degrees (clockwise). Omit to auto-detect from container metadata.",
+    )
     args = parser.parse_args()
-    sys.exit(run(args.video, handedness=args.handedness, skip_llm=args.no_llm))
+    sys.exit(run(
+        args.video,
+        handedness=args.handedness,
+        skip_llm=args.no_llm,
+        rotation=args.rotate,
+    ))
 
 
 if __name__ == "__main__":

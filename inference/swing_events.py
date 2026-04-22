@@ -21,6 +21,7 @@ import torch
 import torch.nn.functional as F
 
 from capture.config import load_config
+from inference.video_io import Rotation, apply_rotation, open_video
 
 EVENT_NAMES: tuple[str, ...] = (
     "Address",
@@ -107,41 +108,52 @@ def load_model(device: torch.device | str | None = None) -> torch.nn.Module:
     return net
 
 
-def _read_and_preprocess(video_path: Path) -> np.ndarray:
+def _read_and_preprocess(
+    video_path: Path,
+    rotation: Rotation | None = None,
+) -> np.ndarray:
     """Read video → letterboxed 160x160 RGB frames, normalized to ImageNet stats.
 
-    Returns float32 array of shape (T, 3, 160, 160), ready to batch into the model.
+    Applies container/metadata rotation (or an explicit override) BEFORE
+    letterbox-resize, since the aspect ratio depends on the post-rotation
+    dimensions. Returns float32 array of shape (T, 3, 160, 160).
     """
-    cap = cv2.VideoCapture(str(video_path))
-    if not cap.isOpened():
-        raise FileNotFoundError(f"Could not open video: {video_path}")
+    cap, rot = open_video(video_path, rotation=rotation)
+    try:
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if not total:
+            raise ValueError(f"Video has zero frames: {video_path}")
 
-    h = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
-    w = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
-    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    if not total:
-        raise ValueError(f"Video has zero frames: {video_path}")
-
-    ratio = _INPUT_SIZE / max(h, w)
-    new_h, new_w = int(h * ratio), int(w * ratio)
-    pad_w = _INPUT_SIZE - new_w
-    pad_h = _INPUT_SIZE - new_h
-    top, bottom = pad_h // 2, pad_h - pad_h // 2
-    left, right = pad_w // 2, pad_w - pad_w // 2
-
-    frames: list[np.ndarray] = []
-    for _ in range(total):
-        ok, img = cap.read()
+        # Probe one frame post-rotation so letterbox math matches the final geometry.
+        ok, first = cap.read()
         if not ok:
-            break
-        resized = cv2.resize(img, (new_w, new_h))
-        bordered = cv2.copyMakeBorder(
-            resized, top, bottom, left, right,
-            cv2.BORDER_CONSTANT, value=_BORDER_BGR,
-        )
-        rgb = cv2.cvtColor(bordered, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
-        frames.append(rgb)
-    cap.release()
+            raise ValueError(f"Could not read first frame: {video_path}")
+        first = apply_rotation(first, rot)
+        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)  # rewind
+        h, w = first.shape[:2]
+
+        ratio = _INPUT_SIZE / max(h, w)
+        new_h, new_w = int(h * ratio), int(w * ratio)
+        pad_w = _INPUT_SIZE - new_w
+        pad_h = _INPUT_SIZE - new_h
+        top, bottom = pad_h // 2, pad_h - pad_h // 2
+        left, right = pad_w // 2, pad_w - pad_w // 2
+
+        frames: list[np.ndarray] = []
+        for _ in range(total):
+            ok, img = cap.read()
+            if not ok:
+                break
+            img = apply_rotation(img, rot)
+            resized = cv2.resize(img, (new_w, new_h))
+            bordered = cv2.copyMakeBorder(
+                resized, top, bottom, left, right,
+                cv2.BORDER_CONSTANT, value=_BORDER_BGR,
+            )
+            rgb = cv2.cvtColor(bordered, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+            frames.append(rgb)
+    finally:
+        cap.release()
 
     arr = np.stack(frames, axis=0)  # (T, H, W, 3)
     arr = (arr - _IMAGENET_MEAN) / _IMAGENET_STD
@@ -154,6 +166,7 @@ def detect_events(
     model: torch.nn.Module | None = None,
     seq_length: int = 64,
     device: torch.device | str | None = None,
+    rotation: Rotation | None = None,
 ) -> SwingEvents:
     """Run SwingNet over a full video and return 8 event-frame indices + confidences.
 
@@ -166,7 +179,7 @@ def detect_events(
         model = load_model(device=device)
 
     device_t = next(model.parameters()).device
-    frames = _read_and_preprocess(video_path)  # (T, 3, 160, 160)
+    frames = _read_and_preprocess(video_path, rotation=rotation)  # (T, 3, 160, 160)
     t = torch.from_numpy(frames).unsqueeze(0)  # (1, T, 3, 160, 160)
     total_frames = t.shape[1]
 
