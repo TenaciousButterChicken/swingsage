@@ -155,7 +155,17 @@ def predict_frame(
     if idx < 0:
         return _empty()
 
-    box = boxes[idx].detach().cpu().numpy()
+    # NLF returns boxes as (x, y, w, h, score). Convert to (x1, y1, x2, y2, score)
+    # so the stored value matches the `box_xyxy_conf` field name and downstream
+    # crop math can treat it as xyxy without surprises.
+    raw_box = boxes[idx].detach().cpu().numpy()
+    box = np.array([
+        raw_box[0],
+        raw_box[1],
+        raw_box[0] + raw_box[2],
+        raw_box[1] + raw_box[3],
+        raw_box[4],
+    ], dtype=np.float32)
     joints3d = pred["joints3d"][0][idx].detach().cpu().numpy().astype(np.float32)
     joints2d = pred["joints2d"][0][idx].detach().cpu().numpy().astype(np.float32)
     uncert = pred["joint_uncertainties"][0][idx].detach().cpu().numpy().astype(np.float32)
