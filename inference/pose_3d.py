@@ -33,6 +33,7 @@ import torch
 import torchvision  # noqa: F401 — MUST be imported before torch.jit.load to register torchvision::nms
 
 from capture.config import load_config
+from inference.video_io import Rotation, iter_frames as _iter_bgr_frames
 
 # SMPL joint order used by NLF (24 joints).
 SMPL_JOINT_NAMES: tuple[str, ...] = (
@@ -102,16 +103,21 @@ def load_model(device: torch.device | str | None = None) -> torch.jit.ScriptModu
     return model
 
 
-def _pick_best_person(boxes: torch.Tensor) -> int:
+def _pick_best_person(boxes) -> int:
     """Among detected persons in a frame, return the index of the highest-score box.
 
-    `boxes` has shape (num_people, 5) in (x1, y1, x2, y2, score) format. Returns -1
-    if no one was detected.
+    Accepts a tensor of shape (num_people, 5) in (x1, y1, x2, y2, score) format.
+    Returns -1 if boxes is None, empty, or otherwise unusable.
     """
-    if boxes.numel() == 0:
+    if boxes is None:
         return -1
-    scores = boxes[:, 4]
-    return int(scores.argmax().item())
+    try:
+        if boxes.numel() == 0:
+            return -1
+        scores = boxes[:, 4]
+        return int(scores.argmax().item())
+    except (AttributeError, IndexError):
+        return -1
 
 
 def predict_frame(
@@ -130,15 +136,24 @@ def predict_frame(
     with torch.inference_mode(), torch.device(str(device)):
         pred = model.detect_smpl_batched(tensor)
 
-    boxes = pred["boxes"][0]  # (num_people, 5)
-    idx = _pick_best_person(boxes)
-    if idx < 0:
+    def _empty() -> FramePose:
         return FramePose(
             frame_idx=frame_idx, person_idx=-1, box_xyxy_conf=None,
             joints3d=EMPTY_24x3.copy(), joints2d=EMPTY_24x2.copy(),
             joint_uncertainties=EMPTY_24.copy(), pose=EMPTY_72.copy(),
             betas=EMPTY_10.copy(), trans=EMPTY_3.copy(),
         )
+
+    # NLF only includes "boxes" when ≥1 person was detected in the batch.
+    # Graceful fallback keeps the pipeline running over a full video even
+    # when some frames (e.g. occluded Top) temporarily lose the golfer.
+    boxes_list = pred.get("boxes")
+    if not boxes_list:
+        return _empty()
+    boxes = boxes_list[0]
+    idx = _pick_best_person(boxes)
+    if idx < 0:
+        return _empty()
 
     box = boxes[idx].detach().cpu().numpy()
     joints3d = pred["joints3d"][0][idx].detach().cpu().numpy().astype(np.float32)
@@ -161,27 +176,25 @@ def predict_frame(
     )
 
 
-def iter_video_frames(video_path: str | Path) -> Iterator[tuple[int, np.ndarray]]:
-    """Yield (frame_idx, rgb_uint8_hwc) for every frame of a video."""
-    cap = cv2.VideoCapture(str(video_path))
-    if not cap.isOpened():
-        raise FileNotFoundError(f"Could not open video: {video_path}")
-    idx = 0
-    try:
-        while True:
-            ok, bgr = cap.read()
-            if not ok:
-                break
-            yield idx, cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-            idx += 1
-    finally:
-        cap.release()
+def iter_video_frames(
+    video_path: str | Path,
+    rotation: Rotation | None = None,
+) -> Iterator[tuple[int, np.ndarray]]:
+    """Yield (frame_idx, rgb_uint8_hwc) for every frame, rotation-corrected.
+
+    `rotation` is None → auto-detect from container metadata (iPhone portrait
+    videos ship a 90° flag OpenCV otherwise ignores). Pass an explicit value
+    (0/90/180/270) to override when metadata is wrong or absent.
+    """
+    for idx, bgr in _iter_bgr_frames(video_path, rotation=rotation):
+        yield idx, cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
 
 def predict_video(
     video_path: str | Path,
     model: torch.jit.ScriptModule | None = None,
     verbose: bool = False,
+    rotation: Rotation | None = None,
 ) -> list[FramePose]:
     """Run NLF per-frame over a full video. Sequential — batching is slower for this model."""
     if model is None:
@@ -189,7 +202,7 @@ def predict_video(
 
     out: list[FramePose] = []
     t_start = time.perf_counter()
-    for idx, rgb in iter_video_frames(video_path):
+    for idx, rgb in iter_video_frames(video_path, rotation=rotation):
         out.append(predict_frame(model, rgb, frame_idx=idx))
         if verbose and idx and idx % 25 == 0:
             elapsed = time.perf_counter() - t_start
