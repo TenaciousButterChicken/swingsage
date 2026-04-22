@@ -153,12 +153,52 @@ def _peak_frame(series: np.ndarray) -> int:
     return int(np.argmax(s))
 
 
+def _refine_top_from_rotation(
+    chest_rot: np.ndarray,
+    swingnet_top: int | None,
+    impact_frame: int | None,
+) -> int | None:
+    """Return the frame index of the real top-of-backswing, by geometry.
+
+    Top of backswing is the peak |chest rotation| BEFORE impact — anatomically
+    unambiguous. SwingNet often places Top a few frames late (empirically
+    observed: it labeled Neil's impact-adjacent frame 448 as Top at 88%
+    confidence when the actual peak rotation was at frame 433). The pose
+    signal doesn't depend on training distribution, so it's reliable on any
+    swing NLF can parse.
+
+    Falls back to SwingNet's top_frame if we can't establish a valid pre-
+    impact search window or chest_rot is mostly NaN.
+    """
+    if impact_frame is None or impact_frame <= 0:
+        return swingnet_top
+    lo, hi = 0, min(int(impact_frame), len(chest_rot))
+    if hi - lo < 3:
+        return swingnet_top
+    sub = chest_rot[lo:hi]
+    if np.all(np.isnan(sub)):
+        return swingnet_top
+    abs_sub = np.abs(np.nan_to_num(sub, nan=0.0))
+    return int(lo + np.argmax(abs_sub))
+
+
 def compute_metrics(
     frames: list[FramePose],
     events: SwingEvents | None = None,
     handedness: Handedness = "right",
+    refine_top_from_pose: bool = True,
+    impact_hint: int | None = None,
 ) -> SwingMetrics:
-    """Run the full biomechanical analysis. See module docstring for scope."""
+    """Run the full biomechanical analysis. See module docstring for scope.
+
+    refine_top_from_pose: when True, override SwingNet's top_frame with the
+        geometrically-true peak of chest rotation before impact. Strongly
+        recommended — SwingNet often misidentifies impact-adjacent frames
+        as Top on amateur swings, which poisons every "at_top" metric.
+    impact_hint: if supplied, use this as Impact instead of events.frames[5]
+        (auto-trim's wrist-velocity peak is more reliable than SwingNet's
+        Impact detection, which is often <2% confidence on amateur clips).
+    """
     if not frames:
         raise ValueError("No frames supplied")
 
@@ -253,6 +293,18 @@ def compute_metrics(
     address_frame = events.frames[0] if events else None
     top_frame = events.frames[3] if events else None
     impact_frame = events.frames[5] if events else None
+
+    # Impact refinement: auto-trim's wrist-velocity peak is geometric and
+    # reliable on any swing NLF can parse. SwingNet's Impact is usually
+    # <2% confidence on amateur clips — trust the physics instead.
+    if impact_hint is not None:
+        impact_frame = int(impact_hint)
+
+    # Top refinement: override SwingNet's (often wrong on amateur swings)
+    # with the peak chest-rotation frame before impact. See
+    # _refine_top_from_rotation docstring for why.
+    if refine_top_from_pose:
+        top_frame = _refine_top_from_rotation(chest_rot, top_frame, impact_frame)
 
     def _at(frame: int | None, series: np.ndarray) -> float | None:
         if frame is None or frame < 0 or frame >= T:

@@ -193,9 +193,26 @@ def run(
         print("  or down-the-line camera angle, or check rotation if not yet set.")
 
     print("\n[5/5] Biomechanical metrics + Qwen 3 14B coaching")
-    # Metrics computed on the windowed pose slice with windowed events.
-    m = compute_metrics(window_poses, events=events_rel, handedness=handedness)
+    # Use auto-trim's impact frame (wrist-velocity peak) as the Impact anchor;
+    # it's geometric and reliable even when SwingNet's Impact is weak.
+    # Window-relative impact index for compute_metrics:
+    impact_hint_rel = window.impact - window.start if not window.used_fallback else None
+    m = compute_metrics(
+        window_poses,
+        events=events_rel,
+        handedness=handedness,
+        impact_hint=impact_hint_rel,
+    )
     payload = metrics_to_coach_dict(m)
+    # Tell the user which events we're actually using vs SwingNet's raw output.
+    if m.top_frame is not None and events_rel.frames[3] != m.top_frame:
+        orig = events_rel.frames[3] + window.start
+        ref = m.top_frame + window.start
+        print(f"  [refined] Top: SwingNet said {orig}, pose geometry says {ref} ({abs(orig - ref)} frame shift)")
+    if m.impact_frame is not None and events_rel.frames[5] != m.impact_frame:
+        orig = events_rel.frames[5] + window.start
+        ref = m.impact_frame + window.start
+        print(f"  [refined] Impact: SwingNet said {orig}, wrist-velocity peak at {ref} ({abs(orig - ref)} frame shift)")
     payload = _remap_payload_frames(payload, offset=window.start)
     print(json.dumps(payload, indent=2))
 
