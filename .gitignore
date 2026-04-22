@@ -253,6 +253,9 @@ weights/
 # Third-party clones (SwingNet/golfdb, NLF, MMPose source — pulled via scripts)
 third_party/
 
+# User swing captures and probe frames — local only
+captures/
+
 # Setup / install logs
 setup_output.log
 torch_install.log
