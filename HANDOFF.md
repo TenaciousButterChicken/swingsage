@@ -127,6 +127,30 @@ ollama run qwen2.5:14b-instruct-q4_K_M "Say hello"
 If quality ever feels insufficient, swap for `qwen2.5:14b-instruct-q5_K_M`
 (~10.5 GB, slightly smarter, still fits) before climbing to 32B.
 
+## VTrack hardware status on this Windows box (as of 2026-04-22)
+
+**Step 7 of Phase 1 handoff (real-hardware integration test) is DEFERRED.**
+
+- Installed: `C:\Program Files\LAON PEOPLE\VTrackToolKit\` — **Win32 app**, build
+  dated 2025-10-20, not UWP. The `v2.0.13_release.zip` leftover in `%TEMP%`
+  suggests this is a 2.0.x install.
+- The expected UWP path
+  `%LOCALAPPDATA%\Packages\02ce737d-b4f8-4bbb-92b2-1355681ff1e8_qbntr2denpnae\LocalState\LAON PEOPLE\LPGDLL\ShotData`
+  does NOT exist.
+- Binary-string analysis of `LPGAgent.exe` + `LPGDLL_x64.dll` confirms this
+  version does not emit ShotData JSON to disk — all `ShotData` occurrences are
+  C# class/method names (`AddShotDataEntry`, `OnShotDataChanged`, `SendShotData`,
+  `IntegratedShotDataPacket`, etc.). Shot data is sent straight to GSPro via
+  the in-process integration (`Settings.xml` → `SimulatorType="GSPro"`).
+
+**To unblock real-hardware capture:** upgrade to VTrackToolKit v2.1.5+ UWP
+(Microsoft Store build), then the AppData `ShotData` folder should start
+appearing. Once it exists and has at least one JSON file, flip
+`SWINGSAGE_USE_MOCK_VTRACK=false` in `.env` and re-run Step 7.
+
+Until then `.env` has `SWINGSAGE_USE_MOCK_VTRACK=true` so the watcher uses
+`tests/fixtures/vtrack_shots/` and Phase 2 dev can proceed without hardware.
+
 ## Common gotchas
 
 | Symptom | Likely cause | Fix |
