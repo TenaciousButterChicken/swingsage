@@ -190,6 +190,35 @@ def iter_video_frames(
         yield idx, cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
 
+def predict_from_frames(
+    bgr_frames: list[np.ndarray],
+    model: torch.jit.ScriptModule | None = None,
+    verbose: bool = False,
+) -> list[FramePose]:
+    """Run NLF per-frame over an already-decoded, already-rotated BGR frame list.
+
+    This is the path used when the pipeline has already loaded the whole video
+    into memory (e.g. to share frames between NLF and SwingNet). The input is
+    HWC uint8 in BGR color order, matching what cv2.VideoCapture returns.
+    """
+    if model is None:
+        model = load_model()
+
+    out: list[FramePose] = []
+    t_start = time.perf_counter()
+    for idx, bgr in enumerate(bgr_frames):
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        out.append(predict_frame(model, rgb, frame_idx=idx))
+        if verbose and idx and idx % 25 == 0:
+            elapsed = time.perf_counter() - t_start
+            print(f"  {idx} frames  ({elapsed/idx*1000:.0f} ms/frame avg)")
+
+    if verbose:
+        elapsed = time.perf_counter() - t_start
+        print(f"Done: {len(out)} frames in {elapsed:.1f}s ({elapsed/max(len(out),1)*1000:.0f} ms/frame avg)")
+    return out
+
+
 def predict_video(
     video_path: str | Path,
     model: torch.jit.ScriptModule | None = None,
