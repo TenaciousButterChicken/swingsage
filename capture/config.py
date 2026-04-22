@@ -15,6 +15,10 @@ from dotenv import load_dotenv
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 FIXTURES_VTRACK_DIR = REPO_ROOT / "tests" / "fixtures" / "vtrack_shots"
+THIRD_PARTY_DIR = REPO_ROOT / "third_party"
+DEFAULT_GOLFDB_DIR = THIRD_PARTY_DIR / "golfdb"
+DEFAULT_SWINGNET_WEIGHTS = DEFAULT_GOLFDB_DIR / "models" / "swingnet_1800.pth.tar"
+DEFAULT_NLF_WEIGHTS = THIRD_PARTY_DIR / "nlf" / "weights" / "nlf_l_multi_0.3.2.torchscript"
 
 
 def _truthy(val: str | None) -> bool:
@@ -27,8 +31,11 @@ class Config:
     use_mock_vtrack: bool
     data_dir: Path
     db_path: Path
+    swingnet_weights: Path
+    golfdb_dir: Path
+    nlf_weights: Path
     llm_model: str
-    ollama_host: str
+    llm_api_base: str
     log_level: str
 
     @property
@@ -71,7 +78,10 @@ def load_config(env_file: Path | None = None) -> Config:
         use_mock_vtrack=use_mock,
         data_dir=data_dir,
         db_path=db_path,
-        llm_model=os.environ.get("SWINGSAGE_LLM_MODEL", "qwen2.5:14b-instruct-q4_K_M"),
-        ollama_host=os.environ.get("SWINGSAGE_OLLAMA_HOST", "http://127.0.0.1:11434"),
+        swingnet_weights=Path(os.environ.get("SWINGSAGE_SWINGNET_WEIGHTS", DEFAULT_SWINGNET_WEIGHTS)).expanduser(),
+        golfdb_dir=Path(os.environ.get("SWINGSAGE_GOLFDB_DIR", DEFAULT_GOLFDB_DIR)).expanduser(),
+        nlf_weights=Path(os.environ.get("SWINGSAGE_NLF_WEIGHTS", DEFAULT_NLF_WEIGHTS)).expanduser(),
+        llm_model=os.environ.get("SWINGSAGE_LLM_MODEL", "qwen3-14b"),
+        llm_api_base=os.environ.get("SWINGSAGE_LLM_API_BASE", "http://127.0.0.1:1234/v1"),
         log_level=os.environ.get("SWINGSAGE_LOG_LEVEL", "INFO"),
     )
