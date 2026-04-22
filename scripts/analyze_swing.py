@@ -58,6 +58,50 @@ def _decode_all_frames(video_path: Path, rotation: Rotation | None) -> tuple[lis
     return frames, fps
 
 
+def _crop_frames_to_person(
+    bgr_frames: list,
+    poses: list[FramePose],
+    pad_top_frac: float = 0.40,
+    pad_side_frac: float = 0.20,
+    pad_bottom_frac: float = 0.10,  # keep the ball in frame for Impact detection
+) -> list:
+    """Crop all frames to a single stable box that contains every detected person
+    across the sequence, padded for the club's reach.
+
+    SwingNet was trained on clips pre-cropped to the golfer (per GolfDB paper:
+    "extracting the range of frames using the Bbox coordinates to place the
+    golfer at the center"). Feeding it the full room drops the golfer to ~30%
+    of a 160x160 input where keypoints become indistinguishable — confidences
+    collapse below 0.1. A stable crop across the window restores the golfer
+    to ~70% of input height, which is what the model expects.
+
+    Padding defaults reflect golf-specific club reach: lots of headroom for
+    the top-of-backswing position, modest side room for the swing arc.
+    """
+    boxes = [p.box_xyxy_conf[:4] for p in poses if p.detected and p.box_xyxy_conf is not None]
+    if not boxes or not bgr_frames:
+        return bgr_frames
+
+    H, W = bgr_frames[0].shape[:2]
+    xs1 = min(b[0] for b in boxes)
+    ys1 = min(b[1] for b in boxes)
+    xs2 = max(b[2] for b in boxes)
+    ys2 = max(b[3] for b in boxes)
+
+    box_w = xs2 - xs1
+    box_h = ys2 - ys1
+    pad_x = pad_side_frac * box_w
+    pad_top = pad_top_frac * box_h
+    pad_bot = pad_bottom_frac * box_h
+
+    x1 = max(0, int(xs1 - pad_x))
+    y1 = max(0, int(ys1 - pad_top))
+    x2 = min(W, int(xs2 + pad_x))
+    y2 = min(H, int(ys2 + pad_bot))
+
+    return [f[y1:y2, x1:x2] for f in bgr_frames]
+
+
 def _remap_events(events: SwingEvents, offset: int) -> SwingEvents:
     """Shift event frame indices from window-relative to original-video timeline."""
     if offset == 0:
@@ -129,10 +173,15 @@ def run(
 
     window_frames = all_frames[window.start:window.end]
     window_poses = all_poses[window.start:window.end]
+    cropped_frames = _crop_frames_to_person(window_frames, window_poses)
+    orig_h, orig_w = window_frames[0].shape[:2]
+    crop_h, crop_w = cropped_frames[0].shape[:2]
+    crop_frac = crop_h / orig_h if orig_h else 1.0
 
-    print(f"\n[4/5] SwingNet event detection on window ({len(window_frames)} frames)")
+    print(f"\n[4/5] SwingNet event detection on window ({len(cropped_frames)} frames)")
+    print(f"  person-centered crop: {orig_w}x{orig_h} -> {crop_w}x{crop_h} ({crop_frac:.0%} of frame height)")
     t0 = time.perf_counter()
-    events_rel = detect_events_from_frames(window_frames)
+    events_rel = detect_events_from_frames(cropped_frames)
     print(f"  done in {time.perf_counter() - t0:.1f}s")
     events = _remap_events(events_rel, offset=window.start)
     for name, frame, conf in zip(events.names, events.frames, events.confidences):
