@@ -45,12 +45,13 @@ class SwingMetrics:
     frame_count: int
 
     # Per-frame series (shape: (frame_count,))
-    pelvis_rotation_deg: np.ndarray       # yaw of hip line vs. baseline
-    chest_rotation_deg: np.ndarray        # yaw of shoulder line vs. baseline
-    x_factor_deg: np.ndarray              # chest minus pelvis
-    spine_tilt_forward_deg: np.ndarray    # pitch: mid-shoulder-pelvis vector vs vertical
-    spine_tilt_side_deg: np.ndarray       # roll: side bend in body frame
-    lead_arm_abduction_deg: np.ndarray    # 180 = straight out from torso
+    pelvis_rotation_deg: np.ndarray       # yaw of hip line vs. baseline; signed (backswing negative for RH golfer)
+    chest_rotation_deg: np.ndarray        # yaw of shoulder line vs. baseline; signed
+    x_factor_deg: np.ndarray              # chest minus pelvis, signed
+    spine_tilt_forward_deg: np.ndarray    # pitch: positive = bent forward (toward ball)
+    spine_tilt_side_deg: np.ndarray       # roll: side bend relative to vertical
+    lead_arm_abduction_deg: np.ndarray    # angle at shoulder; ~90° = arm horizontal
+    lead_arm_flex_deg: np.ndarray         # angle at elbow; 180 = straight arm
     lead_wrist_speed: np.ndarray          # magnitude of per-frame velocity, mm/frame
 
     # Event-anchored scalar metrics (None if the event couldn't be located)
@@ -63,6 +64,7 @@ class SwingMetrics:
     spine_tilt_forward_at_address_deg: float | None
     spine_tilt_side_at_address_deg: float | None
     lead_arm_abduction_at_top_deg: float | None
+    lead_arm_flex_at_top_deg: float | None
 
     # Kinematic sequence: frame index of peak angular velocity, per segment.
     # A mechanically sound swing peaks in order: pelvis → chest → lead_arm → lead_wrist.
@@ -111,21 +113,14 @@ def _joints_array(frames: list[FramePose]) -> np.ndarray:
 
 
 def _gravity_axis_from_frames(joints: np.ndarray) -> np.ndarray:
-    """Estimate the world vertical direction (unit vector in NLF camera frame).
+    """Return the world vertical direction (unit vector) in NLF camera frame.
 
-    Uses the median pelvis→neck vector across all detected frames as the
-    long axis of the body. Golfer's spine approximates vertical through
-    Address and Finish even if bent at Top, and the median is robust to that.
+    NLF's camera convention is X=right, Y=down, Z=forward, so world-up is
+    always -Y regardless of the golfer's posture. We deliberately do NOT
+    derive this from pelvis→neck — a bent-over stance would bias the estimate
+    forward and corrupt spine-tilt calculations at Address.
     """
-    pelvis = joints[:, _J["pelvis"]]
-    neck = joints[:, _J["neck"]]
-    up = neck - pelvis  # (T, 3), points from pelvis up toward head
-    # ignore NaN rows
-    ok = ~np.isnan(up).any(axis=1)
-    if not ok.any():
-        # fallback: NLF outputs Y-down, so world-up is -Y
-        return np.array([0.0, -1.0, 0.0], dtype=np.float32)
-    return _unit(np.median(up[ok], axis=0))
+    return np.array([0.0, -1.0, 0.0], dtype=np.float32)
 
 
 def _project_onto_horizontal_plane(v: np.ndarray, up: np.ndarray) -> np.ndarray:
@@ -178,6 +173,7 @@ def compute_metrics(
     j_trail_sh = _J["right_shoulder" if lead_is_left else "left_shoulder"]
     j_lead_elbow = _J["left_elbow" if lead_is_left else "right_elbow"]
     j_lead_wrist = _J["left_wrist" if lead_is_left else "right_wrist"]
+    # Note: j_lead_sh is defined above; we also want lead shoulder for elbow angle math.
     j_neck = _J["neck"]
     j_pelvis = _J["pelvis"]
 
@@ -203,6 +199,7 @@ def compute_metrics(
     spine_fwd = np.full((T,), np.nan, dtype=np.float32)
     spine_side = np.full((T,), np.nan, dtype=np.float32)
     lead_abd = np.full((T,), np.nan, dtype=np.float32)
+    lead_flex = np.full((T,), np.nan, dtype=np.float32)
 
     for t in range(T):
         if np.isnan(joints[t, j_pelvis, 0]):
@@ -231,10 +228,19 @@ def compute_metrics(
             spine_side[t] = _signed_angle_between(spine_fr_u, up, target_normal)
 
         # Lead-arm abduction: angle between trunk-down axis and lead upper arm.
-        trunk_down = -spine_u  # from neck toward pelvis
+        # ~90° = arm horizontal; 180° = arm pointing straight down alongside torso.
+        trunk_down = -spine_u
         upper_arm = joints[t, j_lead_elbow] - joints[t, j_lead_sh]
         if np.linalg.norm(upper_arm) > 1e-3:
             lead_abd[t] = _unsigned_angle_between(upper_arm, trunk_down)
+
+        # Lead-arm flex: 180° = fully straight arm (the metric a coach means
+        # when they say "lead arm straight at top"). upper_arm and forearm
+        # both flow shoulder→elbow→wrist; collinear for a straight arm so
+        # the angle between them is 0°, hence flex = 180 − that angle.
+        forearm = joints[t, j_lead_wrist] - joints[t, j_lead_elbow]
+        if np.linalg.norm(forearm) > 1e-3:
+            lead_flex[t] = 180.0 - _unsigned_angle_between(upper_arm, forearm)
 
     x_factor = chest_rot - pelvis_rot
 
@@ -293,6 +299,7 @@ def compute_metrics(
         spine_tilt_forward_deg=spine_fwd,
         spine_tilt_side_deg=spine_side,
         lead_arm_abduction_deg=lead_abd,
+        lead_arm_flex_deg=lead_flex,
         lead_wrist_speed=wrist_speed,
         address_frame=address_frame,
         top_frame=top_frame,
@@ -303,16 +310,26 @@ def compute_metrics(
         spine_tilt_forward_at_address_deg=_at(address_frame, spine_fwd),
         spine_tilt_side_at_address_deg=_at(address_frame, spine_side),
         lead_arm_abduction_at_top_deg=_at(top_frame, lead_abd),
+        lead_arm_flex_at_top_deg=_at(top_frame, lead_flex),
         peak_velocity_frame=peak_frames,
         kinematic_sequence_correct=sequence_correct,
     )
 
 
 def metrics_to_coach_dict(m: SwingMetrics) -> dict:
-    """Flatten SwingMetrics to a JSON-safe dict for the LLM prompt template."""
+    """Flatten SwingMetrics to a JSON-safe dict for the LLM prompt template.
+
+    Signed backswing rotations (negative for RH golfers) are collapsed to
+    absolute magnitudes for the coach payload — humans talk about "90° of
+    shoulder turn", not "-90°". The dataclass itself keeps signs for anyone
+    who needs direction.
+    """
 
     def _round(x):
         return None if x is None else round(float(x), 1)
+
+    def _round_abs(x):
+        return None if x is None else round(abs(float(x)), 1)
 
     return {
         "events": {
@@ -325,10 +342,11 @@ def metrics_to_coach_dict(m: SwingMetrics) -> dict:
             "spine_tilt_side_deg": _round(m.spine_tilt_side_at_address_deg),
         },
         "at_top": {
-            "shoulder_turn_deg": _round(m.shoulder_turn_at_top_deg),
-            "hip_turn_deg": _round(m.hip_turn_at_top_deg),
-            "x_factor_deg": _round(m.x_factor_at_top_deg),
+            "shoulder_turn_deg": _round_abs(m.shoulder_turn_at_top_deg),
+            "hip_turn_deg": _round_abs(m.hip_turn_at_top_deg),
+            "x_factor_deg": _round_abs(m.x_factor_at_top_deg),
             "lead_arm_abduction_deg": _round(m.lead_arm_abduction_at_top_deg),
+            "lead_arm_flex_deg": _round(m.lead_arm_flex_at_top_deg),
         },
         "kinematic_sequence": {
             "peak_velocity_frames": m.peak_velocity_frame,
