@@ -245,7 +245,19 @@ weights/
 *.pth.tar
 *.onnx
 *.safetensors
+*.gguf
+*.engine
+*.trt
 ~/.cache/4DHumans/
+
+# Third-party clones (SwingNet/golfdb, NLF, MMPose source — pulled via scripts)
+third_party/
+
+# Setup / install logs
+setup_output.log
+torch_install.log
+requirements_install.log
+windows-resolved.txt
 
 # Sample videos — keep <5MB synthetic test patterns; never commit real swing footage
 tests/fixtures/videos/*.mp4
