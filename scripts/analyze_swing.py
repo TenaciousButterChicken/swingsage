@@ -1,12 +1,14 @@
-"""End-to-end SwingSage pipeline: video → NLF → auto-trim → SwingNet → metrics → Qwen.
+"""End-to-end SwingSage pipeline: video → NLF → auto-trim → SwingNet (diagnostic) → extrema metrics → Qwen.
 
 Usage:
     .venv/Scripts/python.exe scripts/analyze_swing.py path/to/swing.mp4
 
-Auto-trim is ON by default. The pipeline runs NLF on the full clip, locates
-impact via the lead-wrist velocity peak, then windows SwingNet + metrics to
-[impact − 2s, impact + 1.5s]. Pass --no-auto-trim to analyze the full clip
-verbatim. Skips the LLM step if LM Studio isn't reachable.
+Biomechanical metrics are computed as extrema/medians over swing phases — they
+don't depend on any single event frame being detected correctly. SwingNet still
+runs for diagnostic output (showing where the model *thinks* each event is) but
+its output no longer drives the numbers Qwen receives. Auto-trim locates impact
+via the lead-wrist velocity peak (physics, not ML). Skips the LLM step if LM
+Studio isn't reachable.
 """
 
 from __future__ import annotations
@@ -111,13 +113,14 @@ def _remap_events(events: SwingEvents, offset: int) -> SwingEvents:
 
 
 def _remap_payload_frames(payload: dict, offset: int) -> dict:
-    """Shift all frame indices in the coach payload from window-relative to original."""
+    """Shift window-relative frame indices in the coach payload into the
+    original video's timeline so displayed numbers line up with source."""
     if offset == 0:
         return payload
-    ev = payload.get("events", {})
-    for k in ("address_frame", "top_frame", "impact_frame"):
-        if ev.get(k) is not None:
-            ev[k] = int(ev[k]) + offset
+    phases = payload.get("phases", {})
+    for k in ("impact_frame", "peak_shoulder_frame", "setup_end_frame"):
+        if phases.get(k) is not None:
+            phases[k] = int(phases[k]) + offset
     peaks = payload.get("kinematic_sequence", {}).get("peak_velocity_frames", {})
     for k, v in list(peaks.items()):
         if v is not None and v >= 0:
@@ -178,7 +181,7 @@ def run(
     crop_h, crop_w = cropped_frames[0].shape[:2]
     crop_frac = crop_h / orig_h if orig_h else 1.0
 
-    print(f"\n[4/5] SwingNet event detection on window ({len(cropped_frames)} frames)")
+    print(f"\n[4/5] SwingNet events (diagnostic — not used for metrics; {len(cropped_frames)} frames)")
     print(f"  person-centered crop: {orig_w}x{orig_h} -> {crop_w}x{crop_h} ({crop_frac:.0%} of frame height)")
     t0 = time.perf_counter()
     events_rel = detect_events_from_frames(cropped_frames)
@@ -187,32 +190,29 @@ def run(
     for name, frame, conf in zip(events.names, events.frames, events.confidences):
         print(f"    {name:22s}  frame {frame:4d}  conf {conf:.3f}")
 
-    if max(events_rel.confidences) < 0.1:
-        print("  WARNING: all SwingNet confidences < 0.1. Even after auto-trim, the")
-        print("  model can't find a clean swing. Try a longer recording, a face-on")
-        print("  or down-the-line camera angle, or check rotation if not yet set.")
-
     print("\n[5/5] Biomechanical metrics + Qwen 3 14B coaching")
-    # Use auto-trim's impact frame (wrist-velocity peak) as the Impact anchor;
-    # it's geometric and reliable even when SwingNet's Impact is weak.
-    # Window-relative impact index for compute_metrics:
-    impact_hint_rel = window.impact - window.start if not window.used_fallback else None
-    m = compute_metrics(
-        window_poses,
-        events=events_rel,
-        handedness=handedness,
-        impact_hint=impact_hint_rel,
-    )
+    # Compute metrics as extrema/medians over swing phases. impact_frame is
+    # the only anchor needed, and it comes from auto-trim (wrist-velocity
+    # peak) not from SwingNet. If auto-trim fell back to the full clip, we
+    # approximate impact as the wrist-speed peak within the full clip.
+    if window.used_fallback:
+        # detect_swing_window with used_fallback=True sets window.impact=0,
+        # but the wrist-speed peak within the full clip is still meaningful.
+        # Re-derive it from pose data to avoid a bogus impact at frame 0.
+        from analytics.auto_trim import find_impact_frame
+        impact_rel, _ = find_impact_frame(window_poses, handedness=handedness, fps=fps)
+    else:
+        impact_rel = window.impact - window.start
+    m = compute_metrics(window_poses, impact_frame=impact_rel, fps=fps, handedness=handedness)
+
+    # Tell the user which frame our at-top extrema landed on, and whether
+    # the geometric peak matches SwingNet's diagnostic Top.
+    peak_orig = m.peak_shoulder_frame + window.start
+    swingnet_top = events_rel.frames[3] + window.start
+    print(f"  [pose-metrics] peak shoulder-rotation frame = {peak_orig}  "
+          f"(SwingNet said {swingnet_top}; SwingNet is diagnostic-only)")
+
     payload = metrics_to_coach_dict(m)
-    # Tell the user which events we're actually using vs SwingNet's raw output.
-    if m.top_frame is not None and events_rel.frames[3] != m.top_frame:
-        orig = events_rel.frames[3] + window.start
-        ref = m.top_frame + window.start
-        print(f"  [refined] Top: SwingNet said {orig}, pose geometry says {ref} ({abs(orig - ref)} frame shift)")
-    if m.impact_frame is not None and events_rel.frames[5] != m.impact_frame:
-        orig = events_rel.frames[5] + window.start
-        ref = m.impact_frame + window.start
-        print(f"  [refined] Impact: SwingNet said {orig}, wrist-velocity peak at {ref} ({abs(orig - ref)} frame shift)")
     payload = _remap_payload_frames(payload, offset=window.start)
     print(json.dumps(payload, indent=2))
 
