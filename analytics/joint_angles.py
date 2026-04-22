@@ -4,19 +4,26 @@ Computes the golf-specific metrics a coach actually talks about:
   - Pelvis rotation, chest rotation, and X-factor (chest minus pelvis)
   - Spine tilt (forward lean and side bend) from vertical
   - Lead-arm abduction (angle between trunk and lead arm)
+  - Lead-arm flex (elbow angle)
   - Kinematic sequence timing (peak angular-velocity order across pelvis →
     chest → lead arm → lead wrist — the single most important biomechanical
     signature in golf)
+
+Architecture (updated): all "at_top" and "at_address" values are computed as
+extrema or medians over swing phases, NOT sampled at single event frames.
+This is the pattern established by the MIT thesis on MeTRAbs-based golf
+biomechanics (Taylor 2025) and multiple MediaPipe-based open-source
+analyzers — extrema are insensitive to event-localization error. The only
+anchor we need is the auto-trim impact frame (from lead-wrist velocity peak,
+unambiguous physics).
 
 Design note: we do NOT implement full ISB joint coordinate systems (too heavy
 for Phase 2 MVP — needs per-joint reference frames with 3 axes each). Instead
 we use simple geometric operations on 3D joint positions in the NLF camera
 frame, which is sufficient for coaching-grade feedback.
 
-Input: list[FramePose] from inference.pose_3d, plus optional SwingEvents from
-inference.swing_events to anchor metrics at Address / Top / Impact.
-
-Output: SwingMetrics dataclass with per-frame series and event-anchored values.
+Inputs: list[FramePose] from inference.pose_3d, plus the impact frame index
+(window-relative) and fps from analytics.auto_trim.
 """
 
 from __future__ import annotations
@@ -25,9 +32,9 @@ from dataclasses import dataclass
 from typing import Literal
 
 import numpy as np
+from scipy.signal import savgol_filter
 
 from inference.pose_3d import SMPL_JOINT_NAMES, FramePose
-from inference.swing_events import SwingEvents
 
 _J = {name: idx for idx, name in enumerate(SMPL_JOINT_NAMES)}
 
@@ -37,12 +44,28 @@ _J = {name: idx for idx, name in enumerate(SMPL_JOINT_NAMES)}
 _MM_PER_M = 1000.0
 Handedness = Literal["right", "left"]
 
+# Backswing takes ~0.8-1.2 s at normal tempo, so "more than 1.5 s before
+# impact" is safely pre-takeaway even for slow backswings. Used to define
+# the Setup phase over which address-pose medians are computed.
+_SETUP_LEAD_SECONDS = 1.5
+
+# Savitzky-Golay smoothing window for NLF joint time-series. 7 frames is
+# ~0.23 s at 30 fps — short enough to preserve impact spikes but long
+# enough to kill per-frame NLF jitter (~5-20 mm range).
+_SMOOTH_WINDOW = 7
+
 
 @dataclass(frozen=True)
 class SwingMetrics:
-    """Per-frame biomechanical series + event-anchored summary values."""
+    """Per-frame biomechanical series + extrema/median summary values.
+
+    The summary values use extrema over swing phases (Setup / Backswing /
+    Downswing) rather than single-frame samples, so they're robust to the
+    event-localization errors that plagued the old frame-anchored version.
+    """
 
     frame_count: int
+    fps: float
 
     # Per-frame series (shape: (frame_count,))
     pelvis_rotation_deg: np.ndarray       # yaw of hip line vs. baseline; signed (backswing negative for RH golfer)
@@ -54,10 +77,12 @@ class SwingMetrics:
     lead_arm_flex_deg: np.ndarray         # angle at elbow; 180 = straight arm
     lead_wrist_speed: np.ndarray          # magnitude of per-frame velocity, mm/frame
 
-    # Event-anchored scalar metrics (None if the event couldn't be located)
-    address_frame: int | None
-    top_frame: int | None
-    impact_frame: int | None
+    # Phase boundaries (window-relative frame indices)
+    impact_frame: int
+    peak_shoulder_frame: int      # frame of max |chest_rot| during backswing — coupling frame for "at top" metrics
+    setup_end_frame: int          # last frame of the Setup phase (inclusive)
+
+    # Summary values (all computed as extrema/medians, never single-frame samples)
     x_factor_at_top_deg: float | None
     shoulder_turn_at_top_deg: float | None
     hip_turn_at_top_deg: float | None
@@ -83,11 +108,7 @@ def _unit(v: np.ndarray, axis: int = -1, eps: float = 1e-8) -> np.ndarray:
 def _signed_angle_between(
     v: np.ndarray, ref: np.ndarray, normal: np.ndarray
 ) -> float:
-    """Signed angle (degrees) from `ref` to `v`, measured around `normal`.
-
-    All three inputs are 3-vectors. Positive when the rotation follows the
-    right-hand rule around `normal`.
-    """
+    """Signed angle (degrees) from `ref` to `v`, measured around `normal`."""
     v_u = _unit(v)
     r_u = _unit(ref)
     cos = float(np.clip(np.dot(v_u, r_u), -1.0, 1.0))
@@ -109,18 +130,42 @@ def _joints_array(frames: list[FramePose]) -> np.ndarray:
     return out
 
 
-# ─── Core computation ───────────────────────────────────────────────
+def _smooth_joints(joints: np.ndarray) -> np.ndarray:
+    """Savitzky-Golay-smooth the (T, 24, 3) joint time-series along the time axis.
 
-
-def _gravity_axis_from_frames(joints: np.ndarray) -> np.ndarray:
-    """Return the world vertical direction (unit vector) in NLF camera frame.
-
-    NLF's camera convention is X=right, Y=down, Z=forward, so world-up is
-    always -Y regardless of the golfer's posture. We deliberately do NOT
-    derive this from pelvis→neck — a bent-over stance would bias the estimate
-    forward and corrupt spine-tilt calculations at Address.
+    NaN-filled undetected frames get forward/backward-filled before smoothing
+    so the filter doesn't spread NaN. The filled-in values are then restored
+    to NaN in the output to preserve detected/undetected information for the
+    downstream angle math.
     """
-    return np.array([0.0, -1.0, 0.0], dtype=np.float32)
+    T = joints.shape[0]
+    if T < _SMOOTH_WINDOW:
+        return joints  # Too few frames to smooth meaningfully.
+
+    nan_mask = np.isnan(joints[:, 0, 0])  # (T,) — NaN-ness of any joint implies all are NaN
+    detected = np.where(~nan_mask)[0]
+    if len(detected) < _SMOOTH_WINDOW:
+        return joints
+
+    first, last = int(detected[0]), int(detected[-1])
+    filled = joints.copy()
+
+    # Back-fill leading undetected frames with first detection.
+    filled[:first] = joints[first]
+    # Forward-fill trailing undetected frames.
+    filled[last + 1:] = joints[last]
+    # Carry-forward interior gaps.
+    for i in range(first + 1, last + 1):
+        if nan_mask[i]:
+            filled[i] = filled[i - 1]
+
+    # Smooth each joint axis separately along time (axis=0).
+    smoothed = savgol_filter(filled, window_length=_SMOOTH_WINDOW, polyorder=2, axis=0)
+
+    # Re-mask originally-undetected frames as NaN so downstream code treats
+    # them as missing (smoothed edge values there aren't meaningful anyway).
+    smoothed[nan_mask] = np.nan
+    return smoothed.astype(np.float32)
 
 
 def _project_onto_horizontal_plane(v: np.ndarray, up: np.ndarray) -> np.ndarray:
@@ -153,56 +198,39 @@ def _peak_frame(series: np.ndarray) -> int:
     return int(np.argmax(s))
 
 
-def _refine_top_from_rotation(
-    chest_rot: np.ndarray,
-    swingnet_top: int | None,
-    impact_frame: int | None,
-) -> int | None:
-    """Return the frame index of the real top-of-backswing, by geometry.
+def _gravity_axis() -> np.ndarray:
+    """World vertical in NLF's camera frame. NLF outputs X=right, Y=down, Z=forward,
+    so world-up is always -Y regardless of golfer posture."""
+    return np.array([0.0, -1.0, 0.0], dtype=np.float32)
 
-    Top of backswing is the peak |chest rotation| BEFORE impact — anatomically
-    unambiguous. SwingNet often places Top a few frames late (empirically
-    observed: it labeled Neil's impact-adjacent frame 448 as Top at 88%
-    confidence when the actual peak rotation was at frame 433). The pose
-    signal doesn't depend on training distribution, so it's reliable on any
-    swing NLF can parse.
 
-    Falls back to SwingNet's top_frame if we can't establish a valid pre-
-    impact search window or chest_rot is mostly NaN.
-    """
-    if impact_frame is None or impact_frame <= 0:
-        return swingnet_top
-    lo, hi = 0, min(int(impact_frame), len(chest_rot))
-    if hi - lo < 3:
-        return swingnet_top
-    sub = chest_rot[lo:hi]
-    if np.all(np.isnan(sub)):
-        return swingnet_top
-    abs_sub = np.abs(np.nan_to_num(sub, nan=0.0))
-    return int(lo + np.argmax(abs_sub))
+# ─── Core computation ───────────────────────────────────────────────
 
 
 def compute_metrics(
     frames: list[FramePose],
-    events: SwingEvents | None = None,
+    impact_frame: int,
+    fps: float,
     handedness: Handedness = "right",
-    refine_top_from_pose: bool = True,
-    impact_hint: int | None = None,
 ) -> SwingMetrics:
     """Run the full biomechanical analysis. See module docstring for scope.
 
-    refine_top_from_pose: when True, override SwingNet's top_frame with the
-        geometrically-true peak of chest rotation before impact. Strongly
-        recommended — SwingNet often misidentifies impact-adjacent frames
-        as Top on amateur swings, which poisons every "at_top" metric.
-    impact_hint: if supplied, use this as Impact instead of events.frames[5]
-        (auto-trim's wrist-velocity peak is more reliable than SwingNet's
-        Impact detection, which is often <2% confidence on amateur clips).
+    Args:
+        frames: list of per-frame NLF pose predictions (window-relative).
+        impact_frame: window-relative frame index of ball impact, from
+            auto-trim's wrist-velocity peak. Used as the upper bound of
+            the Backswing phase and the anchor for the Setup phase.
+        fps: source video frame rate. Used to convert _SETUP_LEAD_SECONDS
+            into a frame count for the Setup phase boundary.
+        handedness: "right" (lead side = left) or "left" (lead side = right).
     """
     if not frames:
         raise ValueError("No frames supplied")
+    if impact_frame < 0 or impact_frame >= len(frames):
+        raise ValueError(f"impact_frame {impact_frame} out of range [0, {len(frames)})")
 
-    joints = _joints_array(frames)  # (T, 24, 3), NaN where undetected
+    joints_raw = _joints_array(frames)              # (T, 24, 3), NaN where undetected
+    joints = _smooth_joints(joints_raw)             # Savitzky-Golay-smoothed along time
     T = joints.shape[0]
 
     # Lead side depends on handedness. Right-handed golfer's "lead" side is LEFT.
@@ -213,13 +241,13 @@ def compute_metrics(
     j_trail_sh = _J["right_shoulder" if lead_is_left else "left_shoulder"]
     j_lead_elbow = _J["left_elbow" if lead_is_left else "right_elbow"]
     j_lead_wrist = _J["left_wrist" if lead_is_left else "right_wrist"]
-    # Note: j_lead_sh is defined above; we also want lead shoulder for elbow angle math.
     j_neck = _J["neck"]
     j_pelvis = _J["pelvis"]
 
-    up = _gravity_axis_from_frames(joints)
+    up = _gravity_axis()
 
-    # Body-frame axes established from the first reliably-detected frame (Address).
+    # Body-frame axes: use the first reliably-detected frame as the hip-line
+    # reference. All rotations are measured relative to this baseline.
     detected_idx = np.where(~np.isnan(joints[:, j_pelvis, 0]))[0]
     if len(detected_idx) == 0:
         raise ValueError("No detected frames — cannot compute metrics")
@@ -230,10 +258,9 @@ def compute_metrics(
 
     hip_vec0 = _plane_vec(joints[anchor, j_lead_hip] - joints[anchor, j_trail_hip])
     hip_ref = _unit(hip_vec0)
-    # Compute a target-line normal pointing "forward" for the golfer — cross of up x hip_ref.
     target_normal = _unit(np.cross(up, hip_ref))
 
-    # Per-frame series ───────────────────────────────────────────────
+    # ── Per-frame series ─────────────────────────────────────────────
     pelvis_rot = np.full((T,), np.nan, dtype=np.float32)
     chest_rot = np.full((T,), np.nan, dtype=np.float32)
     spine_fwd = np.full((T,), np.nan, dtype=np.float32)
@@ -251,72 +278,86 @@ def compute_metrics(
         if np.linalg.norm(sh_vec) > 1e-3:
             chest_rot[t] = _signed_angle_between(sh_vec, hip_ref, up)
 
-        # Spine tilt: vector from mid-hip to neck, decomposed in the body frame.
         spine = joints[t, j_neck] - joints[t, j_pelvis]
         spine_u = _unit(spine)
-        # Forward pitch: angle between spine and up, measured in the plane
-        # spanned by up and target_normal (the sagittal plane).
         spine_sag = spine_u - np.dot(spine_u, hip_ref) * hip_ref
         if np.linalg.norm(spine_sag) > 1e-3:
-            spine_sag_u = _unit(spine_sag)
-            spine_fwd[t] = _signed_angle_between(spine_sag_u, up, hip_ref)
-        # Side bend: angle between spine and up, measured in the frontal plane
-        # spanned by up and hip_ref.
+            spine_fwd[t] = _signed_angle_between(_unit(spine_sag), up, hip_ref)
         spine_fr = spine_u - np.dot(spine_u, target_normal) * target_normal
         if np.linalg.norm(spine_fr) > 1e-3:
-            spine_fr_u = _unit(spine_fr)
-            spine_side[t] = _signed_angle_between(spine_fr_u, up, target_normal)
+            spine_side[t] = _signed_angle_between(_unit(spine_fr), up, target_normal)
 
-        # Lead-arm abduction: angle between trunk-down axis and lead upper arm.
-        # ~90° = arm horizontal; 180° = arm pointing straight down alongside torso.
         trunk_down = -spine_u
         upper_arm = joints[t, j_lead_elbow] - joints[t, j_lead_sh]
         if np.linalg.norm(upper_arm) > 1e-3:
             lead_abd[t] = _unsigned_angle_between(upper_arm, trunk_down)
 
-        # Lead-arm flex: 180° = fully straight arm (the metric a coach means
-        # when they say "lead arm straight at top"). upper_arm and forearm
-        # both flow shoulder→elbow→wrist; collinear for a straight arm so
-        # the angle between them is 0°, hence flex = 180 − that angle.
         forearm = joints[t, j_lead_wrist] - joints[t, j_lead_elbow]
         if np.linalg.norm(forearm) > 1e-3:
             lead_flex[t] = 180.0 - _unsigned_angle_between(upper_arm, forearm)
 
     x_factor = chest_rot - pelvis_rot
-
-    # Lead wrist linear speed (proxy for club-head motion; the most responsive
-    # velocity channel for kinematic-sequence timing since we don't see the club).
     lead_wrist_pos = joints[:, j_lead_wrist]
     wrist_speed = _velocity_magnitude(lead_wrist_pos)
 
-    # ── Event-anchored single values ─────────────────────────────────
-    address_frame = events.frames[0] if events else None
-    top_frame = events.frames[3] if events else None
-    impact_frame = events.frames[5] if events else None
+    # ── Phase boundaries ─────────────────────────────────────────────
+    # Backswing phase = [0, impact_frame]. The peak of |chest_rot| in this
+    # range is the geometric top-of-backswing — the frame where the at-top
+    # metrics are coupled (shoulder/hip/x-factor/abduction all use this frame).
+    backswing_end = int(impact_frame) + 1
+    chest_abs_backswing = np.abs(np.where(np.isnan(chest_rot[:backswing_end]),
+                                          -np.inf, chest_rot[:backswing_end]))
+    if np.all(np.isneginf(chest_abs_backswing)):
+        peak_shoulder_frame = anchor  # fallback — no valid rotation data
+    else:
+        peak_shoulder_frame = int(np.argmax(chest_abs_backswing))
 
-    # Impact refinement: auto-trim's wrist-velocity peak is geometric and
-    # reliable on any swing NLF can parse. SwingNet's Impact is usually
-    # <2% confidence on amateur clips — trust the physics instead.
-    if impact_hint is not None:
-        impact_frame = int(impact_hint)
+    # Setup phase = everything more than 1.5 s before impact. Medians over
+    # this phase are stable even when the golfer waggles throughout setup.
+    setup_end = max(1, int(impact_frame) - int(round(_SETUP_LEAD_SECONDS * fps)))
+    setup_end = min(setup_end, T)
 
-    # Top refinement: override SwingNet's (often wrong on amateur swings)
-    # with the peak chest-rotation frame before impact. See
-    # _refine_top_from_rotation docstring for why.
-    if refine_top_from_pose:
-        top_frame = _refine_top_from_rotation(chest_rot, top_frame, impact_frame)
-
-    def _at(frame: int | None, series: np.ndarray) -> float | None:
-        if frame is None or frame < 0 or frame >= T:
+    # ── Extrema / medians ───────────────────────────────────────────
+    def _val_at(series: np.ndarray, idx: int) -> float | None:
+        if idx < 0 or idx >= len(series):
             return None
-        v = series[frame]
+        v = series[idx]
         return None if np.isnan(v) else float(v)
 
-    # ── Kinematic sequence ──────────────────────────────────────────
-    # Restrict analysis to the downswing window (Top → Impact) if we have
-    # events — that's where peak angular velocities actually occur.
-    if top_frame is not None and impact_frame is not None and impact_frame > top_frame:
-        lo, hi = int(top_frame), int(impact_frame) + 1
+    def _nanmedian(series: np.ndarray) -> float | None:
+        if len(series) == 0 or np.all(np.isnan(series)):
+            return None
+        return float(np.nanmedian(series))
+
+    def _nanmax(series: np.ndarray) -> float | None:
+        if len(series) == 0 or np.all(np.isnan(series)):
+            return None
+        return float(np.nanmax(series))
+
+    shoulder_turn_at_top = (
+        abs(chest_rot[peak_shoulder_frame])
+        if not np.isnan(chest_rot[peak_shoulder_frame])
+        else None
+    )
+    hip_turn_at_top = (
+        abs(pelvis_rot[peak_shoulder_frame])
+        if not np.isnan(pelvis_rot[peak_shoulder_frame])
+        else None
+    )
+    x_factor_at_top = (
+        shoulder_turn_at_top - hip_turn_at_top
+        if shoulder_turn_at_top is not None and hip_turn_at_top is not None
+        else None
+    )
+    lead_arm_abduction_at_top = _val_at(lead_abd, peak_shoulder_frame)
+    lead_arm_flex_at_top = _nanmax(lead_flex[:backswing_end])
+
+    spine_tilt_forward_at_address = _nanmedian(spine_fwd[:setup_end])
+    spine_tilt_side_at_address = _nanmedian(spine_side[:setup_end])
+
+    # ── Kinematic sequence (uses peak_shoulder_frame as Top) ────────
+    if peak_shoulder_frame < int(impact_frame):
+        lo, hi = peak_shoulder_frame, int(impact_frame) + 1
     else:
         lo, hi = 0, T
 
@@ -345,6 +386,7 @@ def compute_metrics(
 
     return SwingMetrics(
         frame_count=T,
+        fps=float(fps),
         pelvis_rotation_deg=pelvis_rot,
         chest_rotation_deg=chest_rot,
         x_factor_deg=x_factor,
@@ -353,16 +395,16 @@ def compute_metrics(
         lead_arm_abduction_deg=lead_abd,
         lead_arm_flex_deg=lead_flex,
         lead_wrist_speed=wrist_speed,
-        address_frame=address_frame,
-        top_frame=top_frame,
-        impact_frame=impact_frame,
-        x_factor_at_top_deg=_at(top_frame, x_factor),
-        shoulder_turn_at_top_deg=_at(top_frame, chest_rot),
-        hip_turn_at_top_deg=_at(top_frame, pelvis_rot),
-        spine_tilt_forward_at_address_deg=_at(address_frame, spine_fwd),
-        spine_tilt_side_at_address_deg=_at(address_frame, spine_side),
-        lead_arm_abduction_at_top_deg=_at(top_frame, lead_abd),
-        lead_arm_flex_at_top_deg=_at(top_frame, lead_flex),
+        impact_frame=int(impact_frame),
+        peak_shoulder_frame=peak_shoulder_frame,
+        setup_end_frame=setup_end,
+        x_factor_at_top_deg=x_factor_at_top,
+        shoulder_turn_at_top_deg=shoulder_turn_at_top,
+        hip_turn_at_top_deg=hip_turn_at_top,
+        spine_tilt_forward_at_address_deg=spine_tilt_forward_at_address,
+        spine_tilt_side_at_address_deg=spine_tilt_side_at_address,
+        lead_arm_abduction_at_top_deg=lead_arm_abduction_at_top,
+        lead_arm_flex_at_top_deg=lead_arm_flex_at_top,
         peak_velocity_frame=peak_frames,
         kinematic_sequence_correct=sequence_correct,
     )
@@ -371,32 +413,30 @@ def compute_metrics(
 def metrics_to_coach_dict(m: SwingMetrics) -> dict:
     """Flatten SwingMetrics to a JSON-safe dict for the LLM prompt template.
 
-    Signed backswing rotations (negative for RH golfers) are collapsed to
-    absolute magnitudes for the coach payload — humans talk about "90° of
-    shoulder turn", not "-90°". The dataclass itself keeps signs for anyone
-    who needs direction.
+    All "at_top" values are extrema over the Backswing phase (or coupled to
+    the peak-shoulder-rotation frame). All "at_address" values are medians
+    over the Setup phase (everything more than 1.5 s before impact). Humans
+    talk about "90° of shoulder turn", not "-90°", so backswing rotations
+    are reported as unsigned magnitudes.
     """
 
     def _round(x):
         return None if x is None else round(float(x), 1)
 
-    def _round_abs(x):
-        return None if x is None else round(abs(float(x)), 1)
-
     return {
-        "events": {
-            "address_frame": m.address_frame,
-            "top_frame": m.top_frame,
+        "phases": {
             "impact_frame": m.impact_frame,
+            "peak_shoulder_frame": m.peak_shoulder_frame,
+            "setup_end_frame": m.setup_end_frame,
         },
         "at_address": {
             "spine_tilt_forward_deg": _round(m.spine_tilt_forward_at_address_deg),
             "spine_tilt_side_deg": _round(m.spine_tilt_side_at_address_deg),
         },
         "at_top": {
-            "shoulder_turn_deg": _round_abs(m.shoulder_turn_at_top_deg),
-            "hip_turn_deg": _round_abs(m.hip_turn_at_top_deg),
-            "x_factor_deg": _round_abs(m.x_factor_at_top_deg),
+            "shoulder_turn_deg": _round(m.shoulder_turn_at_top_deg),
+            "hip_turn_deg": _round(m.hip_turn_at_top_deg),
+            "x_factor_deg": _round(m.x_factor_at_top_deg),
             "lead_arm_abduction_deg": _round(m.lead_arm_abduction_at_top_deg),
             "lead_arm_flex_deg": _round(m.lead_arm_flex_at_top_deg),
         },
