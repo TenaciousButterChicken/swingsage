@@ -493,6 +493,11 @@ function BallFlightPanel({ ballFlight }: { ballFlight: BallFlight }) {
     }
   })();
 
+  const shape = classifyShotShape(
+    ballFlight.face_angle_deg,
+    ballFlight.spin_axis_deg,
+  );
+
   const ballFields: StatSpec[] = [
     { label: "Ball speed", value: mph(ballFlight.ball_speed_mps), unit: "mph", digits: 1 },
     { label: "Carry", value: yds(ballFlight.carry_distance_m), unit: "yds", digits: 1 },
@@ -518,12 +523,13 @@ function BallFlightPanel({ ballFlight }: { ballFlight: BallFlight }) {
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.45, ease: [0.22, 1, 0.36, 1], delay: 0.12 }}
     >
-      <div className="mb-5 flex items-end justify-between">
+      <div className="mb-5 flex items-end justify-between gap-4">
         <div>
           <p className="label-eyebrow">Ball flight</p>
           <h3 className="mt-1 font-display text-2xl text-ink-100">Paired VTrack shot</h3>
           <p className="mt-1 font-mono text-[11px] text-ink-300">captured at {capturedLocal}</p>
         </div>
+        {shape && <ShotShapeBadge shape={shape} />}
       </div>
 
       <div className="grid gap-4 lg:grid-cols-2">
@@ -547,6 +553,135 @@ function BallFlightPanel({ ballFlight }: { ballFlight: BallFlight }) {
         )}
       </div>
     </motion.div>
+  );
+}
+
+// ─── Shot shape classifier ────────────────────────────────────────────
+// Right-hander convention (we don't store handedness per-shot yet):
+//   face_angle_deg > 0  → face OPEN to target (right)
+//   face_angle_deg < 0  → face CLOSED to target (left)
+//   spin_axis_deg > 0   → right-tilting axis → ball curves right (fade/slice)
+//   spin_axis_deg < 0   → left-tilting axis → ball curves left (draw/hook)
+//
+// Start direction is dominated by face angle (~85% face, 15% path in the
+// new ball flight laws). Curve magnitude is read off the spin axis.
+type Curve = "hook" | "draw" | "straight" | "fade" | "slice";
+type Start = "pull" | "straight" | "push";
+
+export interface ShotShape {
+  label: string;
+  start: Start;
+  curve: Curve;
+  severity: "clean" | "off-line" | "wild";
+}
+
+function classifyShotShape(
+  faceAngleDeg: number | null,
+  spinAxisDeg: number | null,
+): ShotShape | null {
+  if (faceAngleDeg === null || spinAxisDeg === null) return null;
+
+  // Start direction thresholds
+  const face = faceAngleDeg;
+  const start: Start =
+    face < -2 ? "pull" : face > 2 ? "push" : "straight";
+
+  // Curve thresholds on spin axis
+  const axis = spinAxisDeg;
+  const abs = Math.abs(axis);
+  let curve: Curve;
+  if (abs <= 3) curve = "straight";
+  else if (abs <= 12) curve = axis > 0 ? "fade" : "draw";
+  else curve = axis > 0 ? "slice" : "hook";
+
+  // Compose a human label. Pure cases get their own word; mixed cases get
+  // a hyphenated composite like "Pull-fade" or "Push-draw" that golfers
+  // actually use.
+  let label: string;
+  if (start === "straight" && curve === "straight") {
+    label = "Straight";
+  } else if (start === "straight") {
+    label = capitalize(curve);
+  } else if (curve === "straight") {
+    label = capitalize(start);
+  } else {
+    label = `${capitalize(start)}-${curve}`;
+  }
+
+  // Severity: informs color. Straight / near-straight is clean;
+  // moderate off-line curves are "off-line"; slice/hook are "wild".
+  const severity: ShotShape["severity"] =
+    curve === "straight" && start === "straight"
+      ? "clean"
+      : curve === "slice" || curve === "hook"
+        ? "wild"
+        : "off-line";
+
+  return { label, start, curve, severity };
+}
+
+function capitalize(s: string): string {
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+function ShotShapeBadge({ shape }: { shape: ShotShape }) {
+  const color =
+    shape.severity === "clean"
+      ? "text-fairway-400 border-fairway-500/40 bg-fairway-500/10"
+      : shape.severity === "off-line"
+        ? "text-champagne-300 border-champagne-300/40 bg-champagne-300/10"
+        : "text-ember-400 border-ember-500/40 bg-ember-500/10";
+
+  return (
+    <div
+      className={[
+        "flex items-center gap-3 rounded-2xl border px-4 py-2.5",
+        color,
+      ].join(" ")}
+    >
+      <ShapeArrow shape={shape} />
+      <div>
+        <p className="label-eyebrow">Shape</p>
+        <p className="font-display text-lg leading-tight">{shape.label}</p>
+      </div>
+    </div>
+  );
+}
+
+function ShapeArrow({ shape }: { shape: ShotShape }) {
+  // Tiny SVG: a 32×32 sketch showing the flight path. The ball starts at
+  // the bottom and travels up; x-offset at the bottom encodes the start
+  // direction, the curve direction encodes draw vs fade.
+  const startX =
+    shape.start === "pull" ? 6 : shape.start === "push" ? 26 : 16;
+  const endX =
+    shape.curve === "hook" ? 4 :
+    shape.curve === "draw" ? 11 :
+    shape.curve === "fade" ? 21 :
+    shape.curve === "slice" ? 28 : startX;
+  // Control-point for the quadratic curve — bulge to one side based on curve.
+  const controlX =
+    shape.curve === "hook" || shape.curve === "draw"
+      ? Math.min(startX, endX) - 4
+      : shape.curve === "fade" || shape.curve === "slice"
+        ? Math.max(startX, endX) + 4
+        : (startX + endX) / 2;
+
+  return (
+    <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
+      {/* Baseline target line (dashed) */}
+      <line x1="16" y1="4" x2="16" y2="28" stroke="currentColor" strokeWidth="0.8" strokeDasharray="1 2" opacity="0.35" />
+      {/* Flight path */}
+      <path
+        d={`M ${startX} 28 Q ${controlX} 16 ${endX} 4`}
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        fill="none"
+      />
+      {/* Ball at the landing */}
+      <circle cx={endX} cy="4" r="1.8" fill="currentColor" />
+    </svg>
   );
 }
 
