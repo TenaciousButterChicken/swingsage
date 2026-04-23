@@ -95,6 +95,35 @@ export interface TrimInfo {
   window_seconds: number;
 }
 
+// Paired VTrack shot captured by the OpenConnect bridge. All fields are SI
+// units in the DB; the UI converts to mph / yards / ft at render time.
+export interface BallFlight {
+  captured_at: string;
+  ball_speed_mps: number | null;
+  carry_distance_m: number | null;
+  total_distance_m: number | null;
+  launch_angle_deg: number | null;
+  launch_direction_deg: number | null;
+  back_spin_rpm: number | null;
+  side_spin_rpm: number | null;
+  spin_axis_deg: number | null;
+  club_speed_mps: number | null;
+  club_path_deg: number | null;
+  face_angle_deg: number | null;
+  attack_angle_deg: number | null;
+  smash_factor: number | null;
+}
+
+export interface BridgeStatus {
+  listening: boolean;
+  host: string;
+  port: number;
+  gspro_host: string;
+  gspro_port: number;
+  ball_shot_max_age_sec: number;
+  error: string | null;
+}
+
 export interface AnalysisResult {
   elapsed_seconds: number;
   fps: number;
@@ -104,4 +133,5 @@ export interface AnalysisResult {
   swingnet_events: SwingNetEvent[];
   metrics: Metrics;
   coaching: Coaching | null;
+  ball_flight: BallFlight | null;
 }

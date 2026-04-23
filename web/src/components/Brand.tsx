@@ -1,3 +1,5 @@
+import BridgeStatusChip from "./BridgeStatusChip";
+
 interface BrandProps {
   onReset?: () => void;
 }
@@ -20,6 +22,7 @@ export default function Brand({ onReset }: BrandProps) {
       </button>
 
       <div className="hidden items-center gap-3 md:flex">
+        <BridgeStatusChip />
         <span className="label-eyebrow">Runtime</span>
         <Pill label="RTX 5080" />
         <Pill label="Qwen 3 14B" />
