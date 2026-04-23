@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { motion } from "framer-motion";
-import type { AnalysisResult, TrimInfo } from "../lib/types";
+import type { AnalysisResult, BallFlight, TrimInfo } from "../lib/types";
 
 interface ResultsViewProps {
   result: AnalysisResult;
@@ -135,6 +135,9 @@ export default function ResultsView({ result, jobId, onReset }: ResultsViewProps
           />
         </div>
       </motion.div>
+
+      {/* Ball flight — only rendered when a VTrack shot was paired with this video */}
+      {result.ball_flight && <BallFlightPanel ballFlight={result.ball_flight} />}
 
       {/* Coaching */}
       {result.coaching ? (
@@ -467,6 +470,105 @@ function ConfidenceBadge({ level }: { level: "low" | "medium" | "high" }) {
     <div className="flex items-center gap-2">
       <span className="label-eyebrow">Confidence</span>
       <span className={`font-mono text-xs uppercase ${color}`}>{level}</span>
+    </div>
+  );
+}
+
+function BallFlightPanel({ ballFlight }: { ballFlight: BallFlight }) {
+  // Convert the SI-stored values back to what golfers actually think in.
+  const mps_to_mph = 2.2369362920544;
+  const m_to_yds = 1.0936132983377;
+
+  const mph = (v: number | null) => (v === null ? null : v * mps_to_mph);
+  const yds = (v: number | null) => (v === null ? null : v * m_to_yds);
+
+  // Pretty-print the capture timestamp as local HH:MM:SS so the user can
+  // cross-check against when they hit the shot.
+  const capturedLocal = (() => {
+    try {
+      const d = new Date(ballFlight.captured_at);
+      return d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    } catch {
+      return ballFlight.captured_at;
+    }
+  })();
+
+  const ballFields: StatSpec[] = [
+    { label: "Ball speed", value: mph(ballFlight.ball_speed_mps), unit: "mph", digits: 1 },
+    { label: "Carry", value: yds(ballFlight.carry_distance_m), unit: "yds", digits: 1 },
+    { label: "Launch", value: ballFlight.launch_angle_deg, unit: "°", digits: 1 },
+    { label: "Spin axis", value: ballFlight.spin_axis_deg, unit: "°", digits: 1 },
+    { label: "Back spin", value: ballFlight.back_spin_rpm, unit: "rpm", digits: 0 },
+    { label: "Side spin", value: ballFlight.side_spin_rpm, unit: "rpm", digits: 0 },
+  ];
+  const clubFields: StatSpec[] = [
+    { label: "Club speed", value: mph(ballFlight.club_speed_mps), unit: "mph", digits: 1 },
+    { label: "Smash", value: ballFlight.smash_factor, unit: "", digits: 2 },
+    { label: "Club path", value: ballFlight.club_path_deg, unit: "°", digits: 1 },
+    { label: "Face to target", value: ballFlight.face_angle_deg, unit: "°", digits: 1 },
+    { label: "Attack angle", value: ballFlight.attack_angle_deg, unit: "°", digits: 1 },
+  ];
+
+  const visibleBall = ballFields.filter((f) => f.value !== null);
+  const visibleClub = clubFields.filter((f) => f.value !== null);
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 12 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.45, ease: [0.22, 1, 0.36, 1], delay: 0.12 }}
+    >
+      <div className="mb-5 flex items-end justify-between">
+        <div>
+          <p className="label-eyebrow">Ball flight</p>
+          <h3 className="mt-1 font-display text-2xl text-ink-100">Paired VTrack shot</h3>
+          <p className="mt-1 font-mono text-[11px] text-ink-300">captured at {capturedLocal}</p>
+        </div>
+      </div>
+
+      <div className="grid gap-4 lg:grid-cols-2">
+        <div className="card-glass p-6">
+          <p className="label-eyebrow mb-4">Ball</p>
+          <div className="grid gap-4 sm:grid-cols-3">
+            {visibleBall.map((f) => (
+              <StatTile key={f.label} {...f} />
+            ))}
+          </div>
+        </div>
+        {visibleClub.length > 0 && (
+          <div className="card-glass p-6">
+            <p className="label-eyebrow mb-4">Club</p>
+            <div className="grid gap-4 sm:grid-cols-3">
+              {visibleClub.map((f) => (
+                <StatTile key={f.label} {...f} />
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    </motion.div>
+  );
+}
+
+interface StatSpec {
+  label: string;
+  value: number | null;
+  unit: string;
+  digits: number;
+}
+
+function StatTile({ label, value, unit, digits }: StatSpec) {
+  return (
+    <div>
+      <p className="label-eyebrow">{label}</p>
+      <div className="mt-2 flex items-baseline gap-1.5">
+        <span className="font-display text-2xl tracking-tight text-ink-100">
+          {value === null ? "—" : value.toFixed(digits)}
+        </span>
+        {value !== null && unit && (
+          <span className="text-sm text-ink-300">{unit}</span>
+        )}
+      </div>
     </div>
   );
 }

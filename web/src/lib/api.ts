@@ -1,4 +1,4 @@
-import type { WsEvent } from "./types";
+import type { BridgeStatus, WsEvent } from "./types";
 
 // In dev, Vite proxies /api and /captures to 127.0.0.1:8000.
 // In a production build, we assume the frontend is served from the
@@ -33,4 +33,16 @@ export function openProgressSocket(
   ws.addEventListener("close", onClose);
   ws.addEventListener("error", onClose);
   return ws;
+}
+
+export async function getBridgeStatus(): Promise<BridgeStatus> {
+  const res = await fetch("/api/bridge/status");
+  if (!res.ok) throw new Error(`Bridge status failed (${res.status})`);
+  return res.json();
+}
+
+export async function toggleBridge(): Promise<BridgeStatus> {
+  const res = await fetch("/api/bridge/toggle", { method: "POST" });
+  if (!res.ok) throw new Error(`Bridge toggle failed (${res.status})`);
+  return res.json();
 }

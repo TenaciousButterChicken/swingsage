@@ -136,17 +136,45 @@ async def _preload_models() -> None:
     _nlf_model, _swingnet_model = await loop.run_in_executor(None, _load)
 
 
+def _bridge_is_running() -> bool:
+    return _openconnect_task is not None and not _openconnect_task.done()
+
+
+async def _launch_bridge() -> bool:
+    """Start the bridge as a background task if it's not already running.
+    Returns True if we just started it, False if it was already up."""
+    global _openconnect_task
+    if _bridge_is_running():
+        return False
+    _openconnect_task = asyncio.create_task(serve_openconnect(_CFG))
+    return True
+
+
+async def _cancel_bridge() -> bool:
+    """Stop the bridge. Returns True if it was running, False otherwise."""
+    global _openconnect_task
+    task = _openconnect_task
+    if task is None or task.done():
+        return False
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    _openconnect_task = None
+    return True
+
+
 @app.on_event("startup")
 async def _start_openconnect_bridge() -> None:
     """Launch the VTrack → GSPro OpenConnect bridge as a background task so
     every shot gets captured the moment it hits. Disable via
-    SWINGSAGE_OPENCONNECT_ENABLED=false for dev/testing on machines without
-    a launch monitor."""
-    global _openconnect_task
+    SWINGSAGE_OPENCONNECT_ENABLED=false to start the server with the bridge
+    off — the UI toggle can flip it on at runtime either way."""
     if not _CFG.openconnect_enabled:
         print("[startup] OpenConnect bridge disabled (SWINGSAGE_OPENCONNECT_ENABLED=false)")
         return
-    _openconnect_task = asyncio.create_task(serve_openconnect(_CFG))
+    await _launch_bridge()
     print(
         f"[startup] OpenConnect bridge listening on "
         f"{_CFG.openconnect_host}:{_CFG.openconnect_port} "
@@ -157,14 +185,7 @@ async def _start_openconnect_bridge() -> None:
 
 @app.on_event("shutdown")
 async def _stop_openconnect_bridge() -> None:
-    task = _openconnect_task
-    if task is None or task.done():
-        return
-    task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass
+    await _cancel_bridge()
 
 
 async def _emit(job: Job, event: dict[str, Any]) -> None:
@@ -463,6 +484,46 @@ async def chat(job_id: str, req: ChatRequest) -> StreamingResponse:
 @app.get("/api/health")
 async def health() -> dict[str, Any]:
     return {"ok": True, "jobs": len(jobs)}
+
+
+def _bridge_state_dict() -> dict[str, Any]:
+    """Shape of GET /api/bridge/status — reused by the toggle response."""
+    task = _openconnect_task
+    error: str | None = None
+    if task is not None and task.done():
+        # If the task died (port collision, etc.) surface the exception to
+        # the UI so the user isn't left wondering why the chip is grey.
+        exc = task.exception()
+        if exc is not None:
+            error = f"{type(exc).__name__}: {exc}"
+    return {
+        "listening": _bridge_is_running(),
+        "host": _CFG.openconnect_host,
+        "port": _CFG.openconnect_port,
+        "gspro_host": _CFG.openconnect_gspro_host,
+        "gspro_port": _CFG.openconnect_gspro_port,
+        "ball_shot_max_age_sec": _CFG.ball_shot_max_age_sec,
+        "error": error,
+    }
+
+
+@app.get("/api/bridge/status")
+async def bridge_status() -> dict[str, Any]:
+    return _bridge_state_dict()
+
+
+@app.post("/api/bridge/toggle")
+async def bridge_toggle() -> dict[str, Any]:
+    """Flip the bridge between listening and off. Lets the user turn capture
+    on/off from the UI without touching .env or restarting the server."""
+    if _bridge_is_running():
+        await _cancel_bridge()
+    else:
+        await _launch_bridge()
+        # Give start_server a tick to bind; surfaces an immediate error if
+        # the port is already in use.
+        await asyncio.sleep(0.1)
+    return _bridge_state_dict()
 
 
 # SPA mount must be last so /api/* and /captures/* take precedence over the
