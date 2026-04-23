@@ -33,7 +33,12 @@ from analytics.joint_angles import compute_metrics, metrics_to_coach_dict  # noq
 from coach.llm import CoachClient  # noqa: E402
 from inference.pose_3d import FramePose, predict_from_frames  # noqa: E402
 from inference.swing_events import SwingEvents, detect_events_from_frames  # noqa: E402
-from inference.video_io import Rotation, apply_rotation, open_video  # noqa: E402
+from inference.video_io import (  # noqa: E402
+    Rotation,
+    apply_rotation,
+    open_video,
+    write_browser_mp4,
+)
 from inference.visualization import render_pose_overlay_video  # noqa: E402
 
 
@@ -132,15 +137,8 @@ def _save_trim_artifacts(
 
     if not cropped_frames:
         return out_dir
-    h, w = cropped_frames[0].shape[:2]
-    mp4_path = out_dir / "trimmed.mp4"
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    writer = cv2.VideoWriter(str(mp4_path), fourcc, fps, (w, h))
-    try:
-        for f in cropped_frames:
-            writer.write(f)
-    finally:
-        writer.release()
+    # Browser-playable H.264 MP4 (see inference.video_io.write_browser_mp4).
+    write_browser_mp4(cropped_frames, out_dir / "trimmed.mp4", fps)
 
     # Keyframes use original-video frame numbers in the filename so they
     # match what the CLI output shows.

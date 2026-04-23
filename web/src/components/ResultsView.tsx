@@ -1,9 +1,10 @@
 import { useState } from "react";
 import { motion } from "framer-motion";
-import type { AnalysisResult } from "../lib/types";
+import type { AnalysisResult, TrimInfo } from "../lib/types";
 
 interface ResultsViewProps {
   result: AnalysisResult;
+  jobId: string;
   onReset: () => void;
 }
 
@@ -30,7 +31,7 @@ function rate(value: number | null, key: string): Rating | null {
   return "out";
 }
 
-export default function ResultsView({ result, onReset }: ResultsViewProps) {
+export default function ResultsView({ result, jobId, onReset }: ResultsViewProps) {
   return (
     <div className="space-y-10">
       {/* Header */}
@@ -65,7 +66,7 @@ export default function ResultsView({ result, onReset }: ResultsViewProps) {
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.45, ease: [0.22, 1, 0.36, 1] }}
         >
-          <VideoPanel artifacts={result.artifacts} />
+          <VideoPanel artifacts={result.artifacts} trim={result.trim} />
         </motion.div>
 
         <motion.div
@@ -147,24 +148,38 @@ export default function ResultsView({ result, onReset }: ResultsViewProps) {
         </div>
       )}
 
+      {/* Chat — ask Qwen follow-up questions about your numbers */}
+      {result.coaching && <ChatPanel jobId={jobId} />}
+
       {/* SwingNet diagnostic */}
       <SwingNetDiagnostic result={result} />
     </div>
   );
 }
 
-function VideoPanel({ artifacts }: { artifacts: AnalysisResult["artifacts"] }) {
+function VideoPanel({
+  artifacts,
+  trim,
+}: {
+  artifacts: AnalysisResult["artifacts"];
+  trim: TrimInfo;
+}) {
   const [mode, setMode] = useState<"raw" | "pose">("raw");
   const src = mode === "raw" ? artifacts.trimmed_mp4 : artifacts.pose_overlay_mp4;
+  const windowLabel = trim.used_fallback
+    ? `Full clip (${trim.window_seconds.toFixed(1)} s) — auto-trim confidence ${trim.confidence.toFixed(1)}× too low`
+    : `Auto-windowed ${trim.window_seconds.toFixed(1)} s around impact (confidence ${trim.confidence.toFixed(1)}×)`;
 
   return (
     <>
       <div className="flex items-center justify-between border-b border-ink-800/70 px-6 py-4">
         <div>
-          <p className="label-eyebrow">Trimmed swing</p>
+          <p className="label-eyebrow">
+            {trim.used_fallback ? "Untrimmed swing" : "Trimmed swing"}
+          </p>
           <p className="mt-1 font-display text-lg text-ink-100">
             {mode === "raw"
-              ? "Auto-windowed ~3.5 s around impact"
+              ? windowLabel
               : "NLF skeleton overlay — 24 joints per frame"}
           </p>
         </div>
@@ -303,11 +318,22 @@ function RangeBar({
 }
 
 function KeyframeGallery({ result }: { result: AnalysisResult }) {
+  // When auto-trim falls back, window_start/window_end are just the first
+  // and last frames of the source clip — not meaningful swing boundaries.
+  // Relabel them so Neil doesn't read "WINDOW END" and think the pipeline
+  // picked his finish pose.
+  const fell = result.trim.used_fallback;
   const items = [
-    { label: "Window start", src: result.artifacts.keyframes.window_start },
+    {
+      label: fell ? "Clip start" : "Window start",
+      src: result.artifacts.keyframes.window_start,
+    },
     { label: "Top of backswing", src: result.artifacts.keyframes.peak_shoulder_top },
     { label: "Impact", src: result.artifacts.keyframes.impact },
-    { label: "Window end", src: result.artifacts.keyframes.window_end },
+    {
+      label: fell ? "Clip end" : "Window end",
+      src: result.artifacts.keyframes.window_end,
+    },
   ];
   const [active, setActive] = useState(1);
   return (
@@ -491,6 +517,154 @@ function SwingNetDiagnostic({ result }: { result: AnalysisResult }) {
         </div>
       )}
     </div>
+  );
+}
+
+type ChatRole = "user" | "assistant";
+interface ChatMsg {
+  role: ChatRole;
+  content: string;
+}
+
+const STARTER_QUESTIONS = [
+  "What is X-factor and why does mine matter?",
+  "Why is my shoulder turn too big — how do I fix it?",
+  "What drill should I do first this week?",
+  "Explain my kinematic sequence in plain language.",
+];
+
+function ChatPanel({ jobId }: { jobId: string }) {
+  const [messages, setMessages] = useState<ChatMsg[]>([]);
+  const [input, setInput] = useState("");
+  const [streaming, setStreaming] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function send(text: string) {
+    const trimmed = text.trim();
+    if (!trimmed || streaming) return;
+    setError(null);
+    const next: ChatMsg[] = [...messages, { role: "user", content: trimmed }];
+    setMessages(next);
+    setInput("");
+    setStreaming(true);
+
+    // Start an empty assistant bubble we'll fill in as tokens arrive.
+    setMessages((m) => [...m, { role: "assistant", content: "" }]);
+
+    try {
+      const resp = await fetch(`/api/chat/${jobId}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ messages: next }),
+      });
+      if (!resp.ok || !resp.body) {
+        const detail = await resp.text().catch(() => resp.statusText);
+        throw new Error(detail || `HTTP ${resp.status}`);
+      }
+
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let acc = "";
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        acc += decoder.decode(value, { stream: true });
+        setMessages((m) => {
+          const copy = m.slice();
+          copy[copy.length - 1] = { role: "assistant", content: acc };
+          return copy;
+        });
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      // Roll back the empty assistant bubble we optimistically pushed.
+      setMessages((m) => (m[m.length - 1]?.content ? m : m.slice(0, -1)));
+    } finally {
+      setStreaming(false);
+    }
+  }
+
+  return (
+    <motion.div
+      className="card-glass overflow-hidden"
+      initial={{ opacity: 0, y: 12 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.45, ease: [0.22, 1, 0.36, 1], delay: 0.2 }}
+    >
+      <div className="border-b border-ink-800/70 px-6 py-4">
+        <p className="label-eyebrow">Ask the coach</p>
+        <p className="mt-1 font-display text-lg text-ink-100">
+          Follow-up questions about your numbers
+        </p>
+        <p className="mt-1 text-xs text-ink-300">
+          Qwen 3 14B has your biomechanics and its initial diagnosis in context.
+          Ask what a metric means, why yours is off, or what to work on first.
+        </p>
+      </div>
+
+      {messages.length === 0 && (
+        <div className="flex flex-wrap gap-2 border-b border-ink-800/70 px-6 py-4">
+          {STARTER_QUESTIONS.map((q) => (
+            <button
+              key={q}
+              onClick={() => send(q)}
+              className="rounded-full hairline bg-ink-800/40 px-3.5 py-1.5 text-xs text-ink-200 transition-colors hover:bg-ink-800/80 hover:text-ink-100"
+            >
+              {q}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {messages.length > 0 && (
+        <div className="flex flex-col gap-4 px-6 py-5">
+          {messages.map((m, i) => (
+            <div
+              key={i}
+              className={
+                m.role === "user"
+                  ? "self-end max-w-[80%] rounded-2xl bg-champagne-300 px-4 py-2.5 text-sm text-ink-950"
+                  : "self-start max-w-[85%] rounded-2xl bg-ink-800/60 px-4 py-2.5 text-sm leading-relaxed text-ink-100 hairline whitespace-pre-wrap"
+              }
+            >
+              {m.content || (m.role === "assistant" && streaming && i === messages.length - 1 ? (
+                <span className="text-ink-300">Thinking…</span>
+              ) : null)}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {error && (
+        <p className="border-t border-ink-800/70 px-6 py-3 text-xs text-ember-400">
+          {error}
+        </p>
+      )}
+
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          send(input);
+        }}
+        className="flex items-center gap-3 border-t border-ink-800/70 px-6 py-4"
+      >
+        <input
+          type="text"
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          placeholder={streaming ? "Waiting for reply…" : "Ask about your swing…"}
+          disabled={streaming}
+          className="flex-1 bg-transparent font-sans text-sm text-ink-100 placeholder:text-ink-300 focus:outline-none"
+        />
+        <button
+          type="submit"
+          disabled={streaming || !input.trim()}
+          className="rounded-full bg-champagne-300 px-4 py-1.5 font-mono text-[11px] uppercase tracking-widest text-ink-950 transition-opacity disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          {streaming ? "…" : "Send"}
+        </button>
+      </form>
+    </motion.div>
   );
 }
 

@@ -9,7 +9,7 @@ import type { AnalysisResult, StageName } from "./lib/types";
 type Phase =
   | { kind: "upload" }
   | { kind: "processing"; jobId: string; filename: string }
-  | { kind: "results"; result: AnalysisResult }
+  | { kind: "results"; jobId: string; result: AnalysisResult }
   | { kind: "error"; message: string };
 
 const pageTransition = {
@@ -28,8 +28,8 @@ export default function App() {
     setPhase({ kind: "processing", jobId, filename });
   }, []);
 
-  const onJobDone = useCallback((result: AnalysisResult) => {
-    setPhase({ kind: "results", result });
+  const onJobDone = useCallback((jobId: string, result: AnalysisResult) => {
+    setPhase({ kind: "results", jobId, result });
   }, []);
 
   const onJobError = useCallback((message: string) => {
@@ -62,7 +62,7 @@ export default function App() {
             )}
             {phase.kind === "results" && (
               <motion.div key="results" {...pageTransition}>
-                <ResultsView result={phase.result} onReset={goUpload} />
+                <ResultsView jobId={phase.jobId} result={phase.result} onReset={goUpload} />
               </motion.div>
             )}
             {phase.kind === "error" && (

@@ -5,10 +5,17 @@ rotation flag in the .mov container that OpenCV doesn't always apply on
 decode. An unrotated frame is a sideways human, which both SwingNet and
 NLF were trained to not recognize. These helpers normalize orientation
 before the models ever see the pixels.
+
+Also owns the browser-compatible H.264 writer. OpenCV's built-in
+``cv2.VideoWriter`` with fourcc ``mp4v`` produces MPEG-4 Part 2 files
+that Chrome/Edge/Safari will not decode natively — playback in a <video>
+tag shows a blank frame. We pipe BGR frames to the bundled imageio-ffmpeg
+binary instead, producing H.264/yuv420p streams that every browser plays.
 """
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from typing import Iterator, Literal
 
@@ -81,3 +88,71 @@ def iter_frames(
             idx += 1
     finally:
         cap.release()
+
+
+def _ffmpeg_exe() -> str:
+    """Path to the bundled ffmpeg binary. Raises if imageio-ffmpeg is missing."""
+    import imageio_ffmpeg  # noqa: WPS433 — runtime import so video_io stays light
+    return imageio_ffmpeg.get_ffmpeg_exe()
+
+
+def write_browser_mp4(
+    bgr_frames: list[np.ndarray],
+    out_path: str | Path,
+    fps: float,
+    crf: int = 20,
+) -> Path:
+    """Write BGR frames to a browser-playable H.264 MP4 via bundled ffmpeg.
+
+    Uses libx264 + yuv420p (universal browser support), even frame
+    dimensions (H.264 requires them), and ``+faststart`` so the moov
+    atom sits at the head of the file — lets <video> start streaming
+    before the whole file downloads.
+
+    Returns the output path. Raises RuntimeError if ffmpeg exits nonzero.
+    """
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    if not bgr_frames:
+        return out_path
+
+    h, w = bgr_frames[0].shape[:2]
+    # libx264 requires even dimensions when using yuv420p chroma subsampling.
+    pad_w, pad_h = w + (w & 1), h + (h & 1)
+
+    cmd = [
+        _ffmpeg_exe(),
+        "-y",
+        "-loglevel", "error",
+        "-f", "rawvideo",
+        "-pix_fmt", "bgr24",
+        "-s", f"{w}x{h}",
+        "-r", f"{fps:.3f}",
+        "-i", "-",
+        "-an",
+        "-c:v", "libx264",
+        "-preset", "veryfast",
+        "-crf", str(crf),
+        "-pix_fmt", "yuv420p",
+        "-vf", f"pad={pad_w}:{pad_h}:0:0:color=black",
+        "-movflags", "+faststart",
+        str(out_path),
+    ]
+
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+    assert proc.stdin is not None
+    try:
+        for frame in bgr_frames:
+            if frame.shape[:2] != (h, w):
+                # Defensive: ffmpeg's rawvideo input is fixed-dimension. Resize
+                # any stragglers (shouldn't happen in normal pipeline flow).
+                frame = cv2.resize(frame, (w, h))
+            proc.stdin.write(np.ascontiguousarray(frame).tobytes())
+    finally:
+        proc.stdin.close()
+        _, stderr = proc.communicate()
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"ffmpeg failed ({proc.returncode}): {stderr.decode(errors='replace')}"
+        )
+    return out_path

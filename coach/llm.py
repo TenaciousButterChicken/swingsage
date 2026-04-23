@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Iterator
 
 import openai
 
@@ -61,6 +61,61 @@ Reference ranges (amateur → pro):
 Confidence guidance: set "low" if any required field is null; "medium" if
 kinematic_sequence.order_correct is false; otherwise "high".
 """
+
+
+# Separate, conversational system prompt for the follow-up chat. The initial
+# analysis runs in strict-JSON mode; the chat is free-form explanation grounded
+# in the same numbers. Giving Qwen the numbers inline means every answer can
+# reference Neil's actual values instead of generic textbook ranges.
+_CHAT_SYSTEM_PROMPT = """You are a seasoned PGA-level golf coach having a \
+conversation with a player who just got their swing analyzed. You have access \
+to their biomechanical numbers from this one swing, and the initial faults / \
+diagnosis / drills you already gave them.
+
+Your role in this chat:
+- Answer follow-up questions grounded in THEIR numbers (quote specific values).
+- Explain golf terminology in plain language; the player is not a tour pro.
+- When they ask "what is X?" (e.g. "what is X-factor?"), define the concept \
+first in one sentence, then tie it to their specific value and what it means.
+- When they ask "why is my X off?", explain the likely causes and name a \
+concrete drill or check they can do.
+- Keep answers tight: 2-4 short paragraphs max. No preamble, no sign-offs.
+- Don't invent data. If they ask about something you weren't given (ball flight, \
+club path, tempo), say so and suggest what data would answer it.
+
+Reference ranges (amateur target -> pro):
+  shoulder_turn_deg at top: 80-100 (magnitude of upper body rotation)
+  hip_turn_deg at top: 40-55
+  x_factor_deg at top: 35-50 (shoulder minus hip; bigger = more potential power if controlled)
+  spine_tilt_forward_deg at address: 25-40 (bent toward ball)
+  lead_arm_abduction_deg at top: 80-110 (shoulder elevation; ~90 = arm horizontal)
+  lead_arm_flex_deg at top: 160-180 (elbow extension; 180 = fully straight arm)
+  Kinematic sequence ideal: pelvis -> chest -> lead_arm -> lead_wrist (ground up)
+
+Lengths and signs:
+- All "at_top" rotations are unsigned magnitudes.
+- spine_tilt_side positive = tilted away from target (right for right-handers).
+- All metrics are extrema/medians over the relevant swing phase, so they are \
+robust to small event-frame detection errors.
+"""
+
+
+def _chat_context_block(
+    metrics: dict[str, Any],
+    coaching: dict[str, Any] | None,
+) -> str:
+    """Format the swing's numbers + initial coaching as a JSON blob for the
+    chat model's system message. Keeps every field explicit so the model can
+    quote exact values back to the user."""
+    ctx: dict[str, Any] = {"biomechanics": metrics}
+    if coaching:
+        ctx["initial_coaching"] = {
+            "faults": coaching.get("faults", []),
+            "diagnosis": coaching.get("diagnosis", ""),
+            "drills": coaching.get("drills", []),
+            "confidence": coaching.get("confidence", ""),
+        }
+    return json.dumps(ctx, indent=2)
 
 
 _COACHING_SCHEMA: dict[str, Any] = {
@@ -164,6 +219,44 @@ class CoachClient:
             confidence=str(data.get("confidence", "low")),
             raw_json=raw,
         )
+
+    def stream_chat(
+        self,
+        metrics: dict[str, Any],
+        coaching: dict[str, Any] | None,
+        messages: list[dict[str, str]],
+        temperature: float = 0.4,
+    ) -> Iterator[str]:
+        """Yield assistant response tokens for a follow-up conversation about
+        the just-analyzed swing. ``messages`` is the user/assistant history
+        (no system role); this method injects the system prompt + numbers.
+
+        Slightly higher temperature than the initial coaching call because
+        explanations benefit from some variety, while the JSON analysis
+        benefited from determinism."""
+        system_messages: list[dict[str, str]] = [
+            {"role": "system", "content": _CHAT_SYSTEM_PROMPT},
+            {
+                "role": "system",
+                "content": (
+                    "Swing data for this conversation (JSON):\n"
+                    + _chat_context_block(metrics, coaching)
+                ),
+            },
+        ]
+        stream = self.client.chat.completions.create(
+            model=self.model,
+            messages=system_messages + list(messages),
+            temperature=temperature,
+            stream=True,
+        )
+        for chunk in stream:
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta
+            text = getattr(delta, "content", None)
+            if text:
+                yield text
 
 
 def coach_once(

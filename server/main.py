@@ -33,8 +33,9 @@ if str(_REPO_ROOT) not in sys.path:
 import cv2  # noqa: E402
 from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
-from fastapi.responses import JSONResponse  # noqa: E402
+from fastapi.responses import JSONResponse, StreamingResponse  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
+from pydantic import BaseModel  # noqa: E402
 
 from analytics.auto_trim import TrimWindow, detect_swing_window, find_impact_frame  # noqa: E402
 from analytics.joint_angles import compute_metrics, metrics_to_coach_dict  # noqa: E402
@@ -193,6 +194,13 @@ def _run_pipeline(job: Job, loop: asyncio.AbstractEventLoop) -> None:
             window_poses = all_poses[window.start:window.end]
             impact_rel = window.impact - window.start
             window_start = window.start
+        trim_info = {
+            "used_fallback": bool(window.used_fallback),
+            "confidence": float(window.confidence),
+            "window_start": int(window_start),
+            "window_end": int(window_start + len(window_frames)),
+            "window_seconds": round(len(window_frames) / fps, 2),
+        }
 
         # ── Stage 4: SwingNet (diagnostic) ──────────────────────
         stage("swingnet", "SwingNet event detection")
@@ -270,6 +278,7 @@ def _run_pipeline(job: Job, loop: asyncio.AbstractEventLoop) -> None:
             "elapsed_seconds": round(total_seconds, 1),
             "fps": fps,
             "total_frames": len(all_frames),
+            "trim": trim_info,
             "artifacts": artifacts,
             "swingnet_events": swingnet_summary,
             "metrics": payload,
@@ -335,6 +344,52 @@ async def ws_progress(websocket: WebSocket, job_id: str) -> None:
             await websocket.close()
         except Exception:  # noqa: BLE001
             pass
+
+
+class ChatMessage(BaseModel):
+    role: str  # "user" | "assistant"
+    content: str
+
+
+class ChatRequest(BaseModel):
+    messages: list[ChatMessage]
+
+
+@app.post("/api/chat/{job_id}")
+async def chat(job_id: str, req: ChatRequest) -> StreamingResponse:
+    """Stream a follow-up conversation turn grounded in job_id's analysis.
+
+    Client sends the full user/assistant history; the server prepends the
+    system prompt + this swing's numbers and streams Qwen's reply as
+    text/plain chunks. Not SSE-formatted — the response body is just the
+    raw answer tokens, which is trivially consumable by fetch + ReadableStream.
+    """
+    job = jobs.get(job_id)
+    if job is None or job.result is None:
+        raise HTTPException(status_code=404, detail=f"No completed job {job_id}")
+
+    metrics = job.result.get("metrics", {})
+    coaching = job.result.get("coaching")
+    history = [{"role": m.role, "content": m.content} for m in req.messages]
+
+    client = CoachClient()
+    if not client.is_alive():
+        raise HTTPException(
+            status_code=503,
+            detail=f"LM Studio unreachable at {client.base_url}",
+        )
+
+    def _token_stream():
+        try:
+            for token in client.stream_chat(metrics, coaching, history):
+                yield token
+        except Exception as e:  # noqa: BLE001
+            # Surface the failure inline so the client sees something rather
+            # than silently truncated output. The chat UI renders whatever
+            # arrives, so the error text lands in the message bubble.
+            yield f"\n\n[error: {type(e).__name__}: {e}]"
+
+    return StreamingResponse(_token_stream(), media_type="text/plain; charset=utf-8")
 
 
 @app.get("/api/health")

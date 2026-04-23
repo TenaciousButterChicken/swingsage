@@ -6,7 +6,7 @@ import type { AnalysisResult, StageName, WsEvent } from "../lib/types";
 interface ProcessingViewProps {
   jobId: string;
   filename: string;
-  onDone: (result: AnalysisResult) => void;
+  onDone: (jobId: string, result: AnalysisResult) => void;
   onError: (message: string) => void;
 }
 
@@ -51,7 +51,7 @@ export default function ProcessingView({ jobId, filename, onDone, onError }: Pro
         } else if (ev.type === "log") {
           setLogs((prev) => [...prev, ev.message]);
         } else if (ev.type === "done") {
-          onDone(ev.result);
+          onDone(jobId, ev.result);
         } else if (ev.type === "error") {
           onError(ev.message);
         }
