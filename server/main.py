@@ -67,6 +67,12 @@ app.add_middleware(
 app.mount("/captures", StaticFiles(directory=CAPTURES_DIR), name="captures")
 
 
+# Serve the built frontend from the same origin so a single uvicorn process
+# runs the whole app (no separate `npm run dev` required). Mounted later
+# than the API routes so /api/* wins over the SPA catch-all.
+_WEB_DIST = _REPO_ROOT / "web" / "dist"
+
+
 # In-memory job registry. Each job has an asyncio.Queue for progress
 # events and a final result dict (populated when done).
 class Job:
@@ -297,6 +303,13 @@ async def ws_progress(websocket: WebSocket, job_id: str) -> None:
 @app.get("/api/health")
 async def health() -> dict[str, Any]:
     return {"ok": True, "jobs": len(jobs)}
+
+
+# SPA mount must be last so /api/* and /captures/* take precedence over the
+# catch-all. html=True makes StaticFiles fall back to index.html for any
+# path that doesn't resolve to a file — required for SPA routes.
+if _WEB_DIST.exists():
+    app.mount("/", StaticFiles(directory=_WEB_DIST, html=True), name="web")
 
 
 if __name__ == "__main__":
