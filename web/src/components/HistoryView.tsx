@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
-import { getAnalysis, listHistory } from "../lib/api";
+import { deleteAnalysis, getAnalysis, listHistory } from "../lib/api";
 import type { AnalysisResult, HistoryItem } from "../lib/types";
 
 interface HistoryViewProps {
@@ -36,6 +36,19 @@ export default function HistoryView({ onOpen, onBack }: HistoryViewProps) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoadingId(null);
+    }
+  }
+
+  async function remove(item: HistoryItem) {
+    const ok = window.confirm(
+      "Delete this swing from history? The video + analysis files will be removed from disk."
+    );
+    if (!ok) return;
+    try {
+      await deleteAnalysis(item.job_id);
+      setItems((prev) => (prev ?? []).filter((it) => it.job_id !== item.job_id));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -86,6 +99,7 @@ export default function HistoryView({ onOpen, onBack }: HistoryViewProps) {
               key={it.job_id}
               item={it}
               onClick={() => open(it)}
+              onDelete={() => remove(it)}
               loading={loadingId === it.job_id}
               delay={i * 0.03}
             />
@@ -99,66 +113,101 @@ export default function HistoryView({ onOpen, onBack }: HistoryViewProps) {
 function HistoryCard({
   item,
   onClick,
+  onDelete,
   loading,
   delay,
 }: {
   item: HistoryItem;
   onClick: () => void;
+  onDelete: () => void;
   loading: boolean;
   delay: number;
 }) {
   const when = formatWhen(item.created_at);
   return (
-    <motion.button
-      onClick={onClick}
-      disabled={loading}
-      className="card-glass overflow-hidden text-left transition-shadow hover:shadow-glow disabled:opacity-60"
+    <motion.div
+      className="card-glass group relative overflow-hidden transition-shadow hover:shadow-glow"
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.3, delay }}
     >
-      <div className="relative aspect-video bg-ink-900">
-        {item.thumbnail ? (
-          <img
-            src={item.thumbnail}
-            alt=""
-            className="h-full w-full object-cover"
-          />
-        ) : (
-          <div className="grid h-full w-full place-items-center text-xs text-ink-300">
-            No thumbnail
-          </div>
-        )}
-        {item.has_ball_flight && (
-          <span className="absolute right-2 top-2 rounded-full bg-fairway-500/20 px-2 py-0.5 font-mono text-[9px] uppercase tracking-widest text-fairway-400 hairline">
-            VTrack paired
-          </span>
-        )}
-      </div>
-      <div className="p-4">
-        <p className="label-eyebrow">{when}</p>
-        <div className="mt-2 flex items-baseline gap-4 font-mono text-xs text-ink-200">
-          <Summary label="Shoulder" value={item.shoulder_turn_deg} />
-          <Summary label="X-factor" value={item.x_factor_deg} />
+      {/* Delete button — absolutely positioned, stopPropagation so it
+          doesn't also trigger the card's open action. */}
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          onDelete();
+        }}
+        aria-label="Delete this swing from history"
+        title="Delete this swing"
+        className="absolute right-2 top-2 z-10 grid h-7 w-7 place-items-center rounded-full bg-ink-950/70 text-ink-300 opacity-0 transition-all hover:bg-ember-500/20 hover:text-ember-400 focus:opacity-100 group-hover:opacity-100"
+      >
+        <TrashIcon />
+      </button>
+      <button
+        type="button"
+        onClick={onClick}
+        disabled={loading}
+        className="block w-full text-left disabled:opacity-60"
+      >
+        <div className="relative aspect-video bg-ink-900">
+          {item.thumbnail ? (
+            <img
+              src={item.thumbnail}
+              alt=""
+              className="h-full w-full object-cover"
+            />
+          ) : (
+            <div className="grid h-full w-full place-items-center text-xs text-ink-300">
+              No thumbnail
+            </div>
+          )}
+          {item.has_ball_flight && (
+            <span className="absolute left-2 top-2 rounded-full bg-fairway-500/20 px-2 py-0.5 font-mono text-[9px] uppercase tracking-widest text-fairway-400 hairline">
+              VTrack paired
+            </span>
+          )}
         </div>
-        {item.faults.length > 0 && (
-          <ul className="mt-3 space-y-1">
-            {item.faults.map((f) => (
-              <li
-                key={f}
-                className="truncate text-xs text-ember-400"
-                title={f}
-              >
-                • {f}
-              </li>
-            ))}
-          </ul>
-        )}
-        {loading && (
-          <p className="mt-3 text-xs text-champagne-300">Loading analysis…</p>
-        )}
-      </div>
-    </motion.button>
+        <div className="p-4">
+          <p className="label-eyebrow">{when}</p>
+          <div className="mt-2 flex items-baseline gap-4 font-mono text-xs text-ink-200">
+            <Summary label="Shoulder" value={item.shoulder_turn_deg} />
+            <Summary label="X-factor" value={item.x_factor_deg} />
+          </div>
+          {item.faults.length > 0 && (
+            <ul className="mt-3 space-y-1">
+              {item.faults.map((f) => (
+                <li
+                  key={f}
+                  className="truncate text-xs text-ember-400"
+                  title={f}
+                >
+                  • {f}
+                </li>
+              ))}
+            </ul>
+          )}
+          {loading && (
+            <p className="mt-3 text-xs text-champagne-300">Loading analysis…</p>
+          )}
+        </div>
+      </button>
+    </motion.div>
+  );
+}
+
+function TrashIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+      <path
+        d="M3 4.5 H13 M5.5 4.5 V3 A1 1 0 0 1 6.5 2 H9.5 A1 1 0 0 1 10.5 3 V4.5 M4.5 4.5 V13 A1 1 0 0 0 5.5 14 H10.5 A1 1 0 0 0 11.5 13 V4.5 M7 7 V11.5 M9 7 V11.5"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
   );
 }
 
