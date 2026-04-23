@@ -87,3 +87,21 @@ CREATE TABLE IF NOT EXISTS events (
 
 CREATE INDEX IF NOT EXISTS idx_events_swing ON events(swing_id);
 CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type);
+
+-- ─── analyses ─────────────────────────────────────────────────────────
+-- Persistent record of every swing video SwingSage has analyzed. The
+-- full result payload is stored as JSON so this table survives schema
+-- changes to the inner metrics/coaching shapes without migration. A
+-- nullable shot_id links to the VTrack shot paired at analysis time.
+CREATE TABLE IF NOT EXISTS analyses (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id          TEXT    NOT NULL UNIQUE,         -- upload's UUID
+    shot_id         INTEGER REFERENCES shots(id) ON DELETE SET NULL,
+    created_at      TEXT    NOT NULL DEFAULT (datetime('now')),
+    video_path      TEXT    NOT NULL,                -- captures/uploads/<id>.mp4
+    trim_dir        TEXT,                            -- captures/<stem>_trim
+    result_json     TEXT    NOT NULL                 -- the full job.result dict
+);
+
+CREATE INDEX IF NOT EXISTS idx_analyses_created ON analyses(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_analyses_shot ON analyses(shot_id);

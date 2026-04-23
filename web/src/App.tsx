@@ -4,13 +4,15 @@ import Brand from "./components/Brand";
 import UploadView from "./components/UploadView";
 import ProcessingView from "./components/ProcessingView";
 import ResultsView from "./components/ResultsView";
+import HistoryView from "./components/HistoryView";
 import type { AnalysisResult, StageName } from "./lib/types";
 
 type Phase =
   | { kind: "upload" }
   | { kind: "processing"; jobId: string; filename: string }
   | { kind: "results"; jobId: string; result: AnalysisResult }
-  | { kind: "error"; message: string };
+  | { kind: "error"; message: string }
+  | { kind: "history" };
 
 const pageTransition = {
   initial: { opacity: 0, y: 8 },
@@ -36,10 +38,22 @@ export default function App() {
     setPhase({ kind: "error", message });
   }, []);
 
+  const goHistory = useCallback(() => setPhase({ kind: "history" }), []);
+
+  const onHistoryOpen = useCallback(
+    (jobId: string, result: AnalysisResult) => {
+      setPhase({ kind: "results", jobId, result });
+    },
+    [],
+  );
+
   return (
     <div className="relative z-10 flex min-h-screen flex-col">
       <header className="px-8 pt-8 md:px-14 md:pt-10">
-        <Brand onReset={phase.kind !== "upload" ? goUpload : undefined} />
+        <Brand
+          onReset={phase.kind !== "upload" ? goUpload : undefined}
+          onHistory={phase.kind !== "history" ? goHistory : undefined}
+        />
       </header>
 
       <main className="flex flex-1 items-start justify-center px-6 pb-16 pt-8 md:px-14">
@@ -68,6 +82,11 @@ export default function App() {
             {phase.kind === "error" && (
               <motion.div key="error" {...pageTransition}>
                 <ErrorCard message={phase.message} onReset={goUpload} />
+              </motion.div>
+            )}
+            {phase.kind === "history" && (
+              <motion.div key="history" {...pageTransition}>
+                <HistoryView onOpen={onHistoryOpen} onBack={goUpload} />
               </motion.div>
             )}
           </AnimatePresence>

@@ -1,4 +1,4 @@
-import type { BridgeStatus, WsEvent } from "./types";
+import type { AnalysisResult, BridgeStatus, HistoryItem, WsEvent } from "./types";
 
 // In dev, Vite proxies /api and /captures to 127.0.0.1:8000.
 // In a production build, we assume the frontend is served from the
@@ -44,5 +44,20 @@ export async function getBridgeStatus(): Promise<BridgeStatus> {
 export async function toggleBridge(): Promise<BridgeStatus> {
   const res = await fetch("/api/bridge/toggle", { method: "POST" });
   if (!res.ok) throw new Error(`Bridge toggle failed (${res.status})`);
+  return res.json();
+}
+
+export async function listHistory(): Promise<{ items: HistoryItem[] }> {
+  const res = await fetch("/api/history");
+  if (!res.ok) throw new Error(`History fetch failed (${res.status})`);
+  return res.json();
+}
+
+export async function getAnalysis(jobId: string): Promise<AnalysisResult> {
+  const res = await fetch(`/api/analysis/${jobId}`);
+  if (!res.ok) {
+    const txt = await res.text();
+    throw new Error(`Analysis fetch failed (${res.status}): ${txt}`);
+  }
   return res.json();
 }
