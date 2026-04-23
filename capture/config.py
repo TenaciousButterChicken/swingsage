@@ -37,6 +37,14 @@ class Config:
     llm_model: str
     llm_api_base: str
     log_level: str
+    # VTrack ↔ GSPro bridge (OpenConnect v1 over localhost TCP).
+    openconnect_enabled: bool
+    openconnect_host: str
+    openconnect_port: int
+    openconnect_gspro_host: str
+    openconnect_gspro_port: int
+    # How fresh a shot must be to be joined to an uploaded swing video.
+    ball_shot_max_age_sec: int
 
     @property
     def is_mac(self) -> bool:
@@ -73,6 +81,14 @@ def load_config(env_file: Path | None = None) -> Config:
     data_dir = Path(os.environ.get("SWINGSAGE_DATA_DIR", REPO_ROOT / "data" / "runtime")).expanduser()
     db_path = Path(os.environ.get("SWINGSAGE_DB_PATH", data_dir / "swingsage.db")).expanduser()
 
+    # OpenConnect bridge defaults to ON on Windows (real hardware), OFF elsewhere
+    # unless explicitly enabled. The env var always wins when set.
+    explicit_openconnect = os.environ.get("SWINGSAGE_OPENCONNECT_ENABLED")
+    if explicit_openconnect is None or explicit_openconnect == "":
+        openconnect_enabled = sys.platform == "win32"
+    else:
+        openconnect_enabled = _truthy(explicit_openconnect)
+
     return Config(
         vtrack_shotdata_path=vtrack_path,
         use_mock_vtrack=use_mock,
@@ -84,4 +100,10 @@ def load_config(env_file: Path | None = None) -> Config:
         llm_model=os.environ.get("SWINGSAGE_LLM_MODEL", "qwen3-14b"),
         llm_api_base=os.environ.get("SWINGSAGE_LLM_API_BASE", "http://127.0.0.1:1234/v1"),
         log_level=os.environ.get("SWINGSAGE_LOG_LEVEL", "INFO"),
+        openconnect_enabled=openconnect_enabled,
+        openconnect_host=os.environ.get("SWINGSAGE_OPENCONNECT_HOST", "127.0.0.1"),
+        openconnect_port=int(os.environ.get("SWINGSAGE_OPENCONNECT_PORT", "921")),
+        openconnect_gspro_host=os.environ.get("SWINGSAGE_OPENCONNECT_GSPRO_HOST", "127.0.0.1"),
+        openconnect_gspro_port=int(os.environ.get("SWINGSAGE_OPENCONNECT_GSPRO_PORT", "922")),
+        ball_shot_max_age_sec=int(os.environ.get("SWINGSAGE_BALL_SHOT_MAX_AGE_SEC", "120")),
     )
