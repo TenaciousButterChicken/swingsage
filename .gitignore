@@ -262,6 +262,12 @@ torch_install.log
 requirements_install.log
 windows-resolved.txt
 
+# Frontend build artifacts
+web/node_modules/
+web/dist/
+web/.vite/
+web/tsconfig.tsbuildinfo
+
 # Sample videos — keep <5MB synthetic test patterns; never commit real swing footage
 tests/fixtures/videos/*.mp4
 tests/fixtures/videos/*.mov
