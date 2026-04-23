@@ -65,20 +65,7 @@ export default function ResultsView({ result, onReset }: ResultsViewProps) {
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.45, ease: [0.22, 1, 0.36, 1] }}
         >
-          <div className="flex items-center justify-between border-b border-ink-800/70 px-6 py-4">
-            <div>
-              <p className="label-eyebrow">Trimmed swing</p>
-              <p className="mt-1 font-display text-lg text-ink-100">
-                Auto-windowed ~3.5 s around impact
-              </p>
-            </div>
-          </div>
-          <video
-            className="block w-full bg-black"
-            src={result.artifacts.trimmed_mp4}
-            controls
-            playsInline
-          />
+          <VideoPanel artifacts={result.artifacts} />
         </motion.div>
 
         <motion.div
@@ -163,6 +150,65 @@ export default function ResultsView({ result, onReset }: ResultsViewProps) {
       {/* SwingNet diagnostic */}
       <SwingNetDiagnostic result={result} />
     </div>
+  );
+}
+
+function VideoPanel({ artifacts }: { artifacts: AnalysisResult["artifacts"] }) {
+  const [mode, setMode] = useState<"raw" | "pose">("raw");
+  const src = mode === "raw" ? artifacts.trimmed_mp4 : artifacts.pose_overlay_mp4;
+
+  return (
+    <>
+      <div className="flex items-center justify-between border-b border-ink-800/70 px-6 py-4">
+        <div>
+          <p className="label-eyebrow">Trimmed swing</p>
+          <p className="mt-1 font-display text-lg text-ink-100">
+            {mode === "raw"
+              ? "Auto-windowed ~3.5 s around impact"
+              : "NLF skeleton overlay — 24 joints per frame"}
+          </p>
+        </div>
+        <div className="flex items-center rounded-full hairline bg-ink-800/50 p-1">
+          <ToggleBtn active={mode === "raw"} onClick={() => setMode("raw")}>
+            Raw
+          </ToggleBtn>
+          <ToggleBtn active={mode === "pose"} onClick={() => setMode("pose")}>
+            Pose overlay
+          </ToggleBtn>
+        </div>
+      </div>
+      <video
+        key={src}
+        className="block w-full bg-black"
+        src={src}
+        controls
+        playsInline
+      />
+    </>
+  );
+}
+
+function ToggleBtn({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={[
+        "rounded-full px-3.5 py-1.5 font-mono text-[11px] uppercase tracking-widest transition-all duration-200",
+        active
+          ? "bg-champagne-300 text-ink-950"
+          : "text-ink-300 hover:text-ink-100",
+      ].join(" ")}
+    >
+      {children}
+    </button>
   );
 }
 
