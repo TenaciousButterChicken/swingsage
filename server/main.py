@@ -39,8 +39,11 @@ from fastapi.staticfiles import StaticFiles  # noqa: E402
 from analytics.auto_trim import TrimWindow, detect_swing_window, find_impact_frame  # noqa: E402
 from analytics.joint_angles import compute_metrics, metrics_to_coach_dict  # noqa: E402
 from coach.llm import CoachClient  # noqa: E402
-from inference.pose_3d import predict_from_frames  # noqa: E402
-from inference.swing_events import detect_events_from_frames  # noqa: E402
+from inference.pose_3d import load_model as load_nlf_model, predict_from_frames  # noqa: E402
+from inference.swing_events import (  # noqa: E402
+    detect_events_from_frames,
+    load_model as load_swingnet_model,
+)
 from inference.video_io import apply_rotation, open_video  # noqa: E402
 
 # Reuse the crop + save-trim helpers from analyze_swing.py
@@ -86,6 +89,37 @@ class Job:
 
 
 jobs: dict[str, Job] = {}
+
+
+# Cached models — loaded once at server startup, reused for every analysis.
+# Without this, each upload paid ~15 s of NLF TorchScript JIT warmup and
+# a few seconds of SwingNet load. See @app.on_event("startup") below.
+_nlf_model = None
+_swingnet_model = None
+
+
+@app.on_event("startup")
+async def _preload_models() -> None:
+    """Load NLF + SwingNet once so the first /api/upload request doesn't
+    pay the JIT compilation penalty. Runs synchronously on the event loop
+    thread pool to keep the server responsive during warmup."""
+    global _nlf_model, _swingnet_model
+    loop = asyncio.get_event_loop()
+
+    def _load() -> tuple[Any, Any]:
+        import time as _time
+        t0 = _time.perf_counter()
+        nlf = load_nlf_model()
+        t1 = _time.perf_counter()
+        swingnet = load_swingnet_model()
+        t2 = _time.perf_counter()
+        print(
+            f"[startup] NLF loaded in {t1-t0:.1f}s, "
+            f"SwingNet loaded in {t2-t1:.1f}s — server ready"
+        )
+        return nlf, swingnet
+
+    _nlf_model, _swingnet_model = await loop.run_in_executor(None, _load)
 
 
 async def _emit(job: Job, event: dict[str, Any]) -> None:
@@ -135,9 +169,9 @@ def _run_pipeline(job: Job, loop: asyncio.AbstractEventLoop) -> None:
         # ── Stage 2: NLF 3D pose ────────────────────────────────
         stage("pose", "NLF 3D pose", total_frames=len(all_frames))
         t0 = time.perf_counter()
-        # Progress callback by polling len(done) every N frames would require
-        # changing predict_from_frames; for now emit periodic log messages.
-        all_poses = predict_from_frames(all_frames, verbose=False)
+        # Use the cached model loaded at startup — skips the ~15s JIT
+        # warmup that otherwise fires on every single analysis.
+        all_poses = predict_from_frames(all_frames, model=_nlf_model, verbose=False)
         detected = sum(1 for f in all_poses if f.detected)
         log(f"Pose: {detected}/{len(all_poses)} detected in {time.perf_counter()-t0:.1f}s")
 
@@ -163,7 +197,7 @@ def _run_pipeline(job: Job, loop: asyncio.AbstractEventLoop) -> None:
         # ── Stage 4: SwingNet (diagnostic) ──────────────────────
         stage("swingnet", "SwingNet event detection")
         cropped_frames = _crop_frames_to_person(window_frames, window_poses)
-        events_rel = detect_events_from_frames(cropped_frames)
+        events_rel = detect_events_from_frames(cropped_frames, model=_swingnet_model)
         swingnet_summary = [
             {"name": name, "frame": int(f + window_start), "confidence": float(c)}
             for name, f, c in zip(events_rel.names, events_rel.frames, events_rel.confidences)
