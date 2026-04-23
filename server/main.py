@@ -39,6 +39,11 @@ from pydantic import BaseModel  # noqa: E402
 
 from analytics.auto_trim import TrimWindow, detect_swing_window, find_impact_frame  # noqa: E402
 from analytics.joint_angles import compute_metrics, metrics_to_coach_dict  # noqa: E402
+from capture.config import load_config  # noqa: E402
+from capture.vtrack_openconnect import (  # noqa: E402
+    latest_ball_flight,
+    serve as serve_openconnect,
+)
 from coach.llm import CoachClient  # noqa: E402
 from inference.pose_3d import load_model as load_nlf_model, predict_from_frames  # noqa: E402
 from inference.swing_events import (  # noqa: E402
@@ -98,6 +103,14 @@ jobs: dict[str, Job] = {}
 _nlf_model = None
 _swingnet_model = None
 
+# Config is loaded once; the VTrack bridge and the ball-flight lookup both
+# read from it. Env changes require a server restart to pick up.
+_CFG = load_config()
+
+# Bridge task handle — created in the startup hook when enabled, cancelled
+# in the shutdown hook. Kept at module scope so both hooks can see it.
+_openconnect_task: asyncio.Task | None = None
+
 
 @app.on_event("startup")
 async def _preload_models() -> None:
@@ -121,6 +134,37 @@ async def _preload_models() -> None:
         return nlf, swingnet
 
     _nlf_model, _swingnet_model = await loop.run_in_executor(None, _load)
+
+
+@app.on_event("startup")
+async def _start_openconnect_bridge() -> None:
+    """Launch the VTrack → GSPro OpenConnect bridge as a background task so
+    every shot gets captured the moment it hits. Disable via
+    SWINGSAGE_OPENCONNECT_ENABLED=false for dev/testing on machines without
+    a launch monitor."""
+    global _openconnect_task
+    if not _CFG.openconnect_enabled:
+        print("[startup] OpenConnect bridge disabled (SWINGSAGE_OPENCONNECT_ENABLED=false)")
+        return
+    _openconnect_task = asyncio.create_task(serve_openconnect(_CFG))
+    print(
+        f"[startup] OpenConnect bridge listening on "
+        f"{_CFG.openconnect_host}:{_CFG.openconnect_port} "
+        f"-> forwarding to GSPro at "
+        f"{_CFG.openconnect_gspro_host}:{_CFG.openconnect_gspro_port}"
+    )
+
+
+@app.on_event("shutdown")
+async def _stop_openconnect_bridge() -> None:
+    task = _openconnect_task
+    if task is None or task.done():
+        return
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
 
 
 async def _emit(job: Job, event: dict[str, Any]) -> None:
@@ -252,6 +296,23 @@ def _run_pipeline(job: Job, loop: asyncio.AbstractEventLoop) -> None:
             },
         }
 
+        # ── Pair with the most recent VTrack shot ───────────────
+        # Look up any shot the OpenConnect bridge captured in the last
+        # ball_shot_max_age_sec seconds. If none, coaching runs on body
+        # metrics only, same as before.
+        ball_flight = latest_ball_flight(_CFG.db_path, _CFG.ball_shot_max_age_sec)
+        if ball_flight is not None:
+            log(
+                f"Paired with VTrack shot captured at {ball_flight['captured_at']} "
+                f"(ball_speed_mps={ball_flight.get('ball_speed_mps')}, "
+                f"carry_m={ball_flight.get('carry_distance_m')})"
+            )
+        else:
+            log(
+                f"No VTrack shot in last {_CFG.ball_shot_max_age_sec}s — "
+                f"coaching on body metrics only"
+            )
+
         # ── Stage 6: Coaching ───────────────────────────────────
         stage("coaching", "Qwen 3 14B coaching")
         t0 = time.perf_counter()
@@ -259,7 +320,7 @@ def _run_pipeline(job: Job, loop: asyncio.AbstractEventLoop) -> None:
         try:
             client = CoachClient()
             if client.is_alive():
-                fb = client.coach(payload)
+                fb = client.coach(payload, ball_data=ball_flight)
                 coaching = {
                     "model": client.model,
                     "confidence": fb.confidence,
@@ -283,6 +344,7 @@ def _run_pipeline(job: Job, loop: asyncio.AbstractEventLoop) -> None:
             "swingnet_events": swingnet_summary,
             "metrics": payload,
             "coaching": coaching,
+            "ball_flight": ball_flight,
         }
         _emit_sync(job, loop, {"type": "done", "result": job.result})
 
@@ -370,6 +432,12 @@ async def chat(job_id: str, req: ChatRequest) -> StreamingResponse:
 
     metrics = job.result.get("metrics", {})
     coaching = job.result.get("coaching")
+    ball_flight = job.result.get("ball_flight")
+    if ball_flight is not None:
+        # Embed ball_flight as a nested key so stream_chat's context block
+        # (which serializes metrics verbatim) shows the model both body
+        # biomechanics and the paired shot numbers in one JSON blob.
+        metrics = {**metrics, "ball_flight": ball_flight}
     history = [{"role": m.role, "content": m.content} for m in req.messages]
 
     client = CoachClient()

@@ -30,6 +30,8 @@ import cv2  # noqa: E402
 
 from analytics.auto_trim import TrimWindow, detect_swing_window  # noqa: E402
 from analytics.joint_angles import compute_metrics, metrics_to_coach_dict  # noqa: E402
+from capture.config import load_config  # noqa: E402
+from capture.vtrack_openconnect import latest_ball_flight  # noqa: E402
 from coach.llm import CoachClient  # noqa: E402
 from inference.pose_3d import FramePose, predict_from_frames  # noqa: E402
 from inference.swing_events import SwingEvents, detect_events_from_frames  # noqa: E402
@@ -198,6 +200,7 @@ def run(
     rotation: int | None = None,
     auto_trim: bool = True,
     save_trimmed: bool = False,
+    attach_latest_shot: bool = False,
 ) -> int:
     _utf8_stdout()
     rot = rotation  # None = auto-detect from metadata
@@ -294,6 +297,19 @@ def run(
         )
         print(f"\n  [saved] trim artifacts -> {out_dir}/")
 
+    ball_flight: dict | None = None
+    if attach_latest_shot:
+        cfg = load_config()
+        ball_flight = latest_ball_flight(cfg.db_path, cfg.ball_shot_max_age_sec)
+        if ball_flight is None:
+            print(
+                f"\n  --attach-latest-shot: no VTrack shot in last "
+                f"{cfg.ball_shot_max_age_sec}s; coaching will run on body metrics only."
+            )
+        else:
+            print(f"\n  --attach-latest-shot: paired with VTrack shot {ball_flight['captured_at']}")
+            print(json.dumps(ball_flight, indent=2, default=str))
+
     if skip_llm:
         print("\nLLM skipped (--no-llm)")
         return 0
@@ -307,7 +323,7 @@ def run(
         print("    lms load qwen_qwen3-14b --gpu max --context-length 16384 --identifier qwen3-14b -y")
         return 2
 
-    fb = client.coach(payload)
+    fb = client.coach(payload, ball_data=ball_flight)
     print(f"\n  Qwen: done in {time.perf_counter() - t0:.1f}s")
     print(f"  model: {client.model}")
     print(f"  confidence: {fb.confidence}")
@@ -342,6 +358,11 @@ def main() -> None:
         action="store_true",
         help="Write the trimmed+cropped clip and keyframe JPGs to captures/<video>_trim/ so you can visually verify the auto-trim.",
     )
+    parser.add_argument(
+        "--attach-latest-shot",
+        action="store_true",
+        help="Look up the most recent VTrack shot captured by the OpenConnect bridge and pass its ball-flight data into Qwen's coaching prompt.",
+    )
     args = parser.parse_args()
     sys.exit(run(
         args.video,
@@ -350,6 +371,7 @@ def main() -> None:
         rotation=args.rotate,
         auto_trim=args.auto_trim,
         save_trimmed=args.save_trimmed,
+        attach_latest_shot=args.attach_latest_shot,
     ))
 
 
