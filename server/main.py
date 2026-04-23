@@ -194,11 +194,14 @@ def _run_pipeline(job: Job, loop: asyncio.AbstractEventLoop) -> None:
             peak_shoulder_orig=m.peak_shoulder_frame + window_start,
             impact_orig=impact_rel + window_start,
             window_end_orig=window_start + len(window_frames),
+            window_uncropped_frames=window_frames,
+            window_poses=window_poses,
         )).resolve()
         # Build URL-relative paths the frontend can fetch via /captures/...
         trim_rel = trim_dir.relative_to(CAPTURES_DIR.resolve()).as_posix()
         artifacts = {
             "trimmed_mp4": f"/captures/{trim_rel}/trimmed.mp4",
+            "pose_overlay_mp4": f"/captures/{trim_rel}/pose_overlay.mp4",
             "keyframes": {
                 "window_start": f"/captures/{trim_rel}/keyframe_window_start_f{window_start:04d}.jpg",
                 "peak_shoulder_top": f"/captures/{trim_rel}/keyframe_peak_shoulder_top_f{m.peak_shoulder_frame + window_start:04d}.jpg",
