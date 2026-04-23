@@ -34,6 +34,7 @@ from coach.llm import CoachClient  # noqa: E402
 from inference.pose_3d import FramePose, predict_from_frames  # noqa: E402
 from inference.swing_events import SwingEvents, detect_events_from_frames  # noqa: E402
 from inference.video_io import Rotation, apply_rotation, open_video  # noqa: E402
+from inference.visualization import render_pose_overlay_video  # noqa: E402
 
 
 def _utf8_stdout() -> None:
@@ -112,13 +113,19 @@ def _save_trim_artifacts(
     peak_shoulder_orig: int,
     impact_orig: int,
     window_end_orig: int,
+    window_uncropped_frames: list | None = None,
+    window_poses: list[FramePose] | None = None,
 ) -> Path:
-    """Write the trimmed+cropped clip and keyframe JPGs so the user can
-    verify what SwingNet/metrics actually saw. Returns the output directory.
+    """Write the trimmed+cropped clip, keyframe JPGs, and (optionally) a
+    pose-overlay video so the user can verify what SwingNet/metrics saw
+    and what NLF tracked.
 
     All saved files go into `captures/<video-basename>_trim/`:
       - trimmed.mp4: the full cropped window at the source fps
       - keyframe_*.jpg: window start, peak-shoulder (metric "Top"), impact, window end
+      - pose_overlay.mp4: the uncropped window with the SMPL skeleton
+        drawn on every detected frame (only written if uncropped frames
+        + poses are supplied)
     """
     out_dir = Path("captures") / f"{video_path.stem}_trim"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -148,6 +155,17 @@ def _save_trim_artifacts(
     _save_frame_at("peak_shoulder_top", peak_shoulder_orig)
     _save_frame_at("impact", impact_orig)
     _save_frame_at("window_end", window_end_orig - 1)
+
+    # Pose overlay video — drawn on the UNCROPPED window so the user sees
+    # the whole scene with the skeleton on top, not the SwingNet crop.
+    if window_uncropped_frames and window_poses:
+        render_pose_overlay_video(
+            window_uncropped_frames,
+            window_poses,
+            out_dir / "pose_overlay.mp4",
+            fps,
+        )
+
     return out_dir
 
 
@@ -273,6 +291,8 @@ def run(
             peak_shoulder_orig=m.peak_shoulder_frame + window.start,
             impact_orig=impact_rel + window.start,
             window_end_orig=window.end,
+            window_uncropped_frames=window_frames,
+            window_poses=window_poses,
         )
         print(f"\n  [saved] trim artifacts -> {out_dir}/")
 
