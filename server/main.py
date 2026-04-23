@@ -44,6 +44,7 @@ from capture.vtrack_openconnect import (  # noqa: E402
     latest_ball_flight,
     serve as serve_openconnect,
 )
+from capture.vtrack_watcher import _connect as _db_connect, _ensure_db  # noqa: E402
 from coach.llm import CoachClient  # noqa: E402
 from inference.pose_3d import load_model as load_nlf_model, predict_from_frames  # noqa: E402
 from inference.swing_events import (  # noqa: E402
@@ -367,6 +368,23 @@ def _run_pipeline(job: Job, loop: asyncio.AbstractEventLoop) -> None:
             "coaching": coaching,
             "ball_flight": ball_flight,
         }
+
+        # Persist the analysis so it survives uvicorn restarts and shows up
+        # in Swing History. We look up the paired shot's row id (if any)
+        # by the vtrack_shot_id we already captured, so deleting a shot
+        # cleanly orphans its analysis via ON DELETE SET NULL.
+        try:
+            _persist_analysis(
+                job_id=job.job_id,
+                video_path=job.video_path,
+                trim_dir=trim_dir,
+                result=job.result,
+                ball_flight=ball_flight,
+            )
+        except Exception as e:  # noqa: BLE001
+            # Don't fail the user's analysis if history persistence breaks.
+            log(f"Warning: failed to persist analysis to history: {e}")
+
         _emit_sync(job, loop, {"type": "done", "result": job.result})
 
     except Exception as e:  # noqa: BLE001
@@ -446,14 +464,34 @@ async def chat(job_id: str, req: ChatRequest) -> StreamingResponse:
     system prompt + this swing's numbers and streams Qwen's reply as
     text/plain chunks. Not SSE-formatted — the response body is just the
     raw answer tokens, which is trivially consumable by fetch + ReadableStream.
+
+    Falls back to the analyses table when the job isn't in the in-memory
+    registry so chat keeps working on history entries after a server
+    restart.
     """
+    result: dict[str, Any] | None = None
     job = jobs.get(job_id)
-    if job is None or job.result is None:
+    if job is not None and job.result is not None:
+        result = job.result
+    else:
+        _ensure_db(_CFG.db_path)
+        with _db_connect(_CFG.db_path) as conn:
+            row = conn.execute(
+                "SELECT result_json FROM analyses WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+        if row is not None:
+            try:
+                result = json.loads(row["result_json"])
+            except (json.JSONDecodeError, TypeError):
+                result = None
+
+    if result is None:
         raise HTTPException(status_code=404, detail=f"No completed job {job_id}")
 
-    metrics = job.result.get("metrics", {})
-    coaching = job.result.get("coaching")
-    ball_flight = job.result.get("ball_flight")
+    metrics = result.get("metrics", {})
+    coaching = result.get("coaching")
+    ball_flight = result.get("ball_flight")
     if ball_flight is not None:
         # Embed ball_flight as a nested key so stream_chat's context block
         # (which serializes metrics verbatim) shows the model both body
@@ -484,6 +522,121 @@ async def chat(job_id: str, req: ChatRequest) -> StreamingResponse:
 @app.get("/api/health")
 async def health() -> dict[str, Any]:
     return {"ok": True, "jobs": len(jobs)}
+
+
+@app.get("/api/history")
+async def history() -> dict[str, Any]:
+    """Lightweight listing of past analyses for the Swing History view.
+
+    Each entry has just enough for a card: job_id, created_at, a thumbnail
+    URL (reusing the window_start keyframe already on disk), a short
+    metric summary, and whether a ball-flight shot was paired.
+    """
+    _ensure_db(_CFG.db_path)
+    with _db_connect(_CFG.db_path) as conn:
+        rows = conn.execute(
+            "SELECT job_id, created_at, shot_id, result_json "
+            "FROM analyses ORDER BY id DESC"
+        ).fetchall()
+
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        try:
+            result = json.loads(row["result_json"])
+        except (json.JSONDecodeError, TypeError):
+            # Stored row is corrupt — skip instead of 500'ing the whole list.
+            continue
+        metrics = result.get("metrics", {}) or {}
+        at_top = metrics.get("at_top", {}) or {}
+        items.append({
+            "job_id": row["job_id"],
+            "created_at": row["created_at"],
+            "thumbnail": (result.get("artifacts") or {}).get("keyframes", {}).get("window_start"),
+            "has_ball_flight": result.get("ball_flight") is not None,
+            "shoulder_turn_deg": at_top.get("shoulder_turn_deg"),
+            "x_factor_deg": at_top.get("x_factor_deg"),
+            "elapsed_seconds": result.get("elapsed_seconds"),
+            "faults": ((result.get("coaching") or {}).get("faults") or [])[:2],
+        })
+    return {"items": items}
+
+
+@app.get("/api/analysis/{job_id}")
+async def analysis_by_id(job_id: str) -> dict[str, Any]:
+    """Rehydrate a past analysis by job_id. Returns the full result payload
+    the user saw when the analysis completed — same shape as the `done`
+    WebSocket event's result, so the frontend can feed it straight into
+    ResultsView."""
+    _ensure_db(_CFG.db_path)
+    with _db_connect(_CFG.db_path) as conn:
+        row = conn.execute(
+            "SELECT result_json FROM analyses WHERE job_id = ?",
+            (job_id,),
+        ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"No saved analysis for {job_id}")
+    try:
+        return json.loads(row["result_json"])
+    except (json.JSONDecodeError, TypeError) as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Saved analysis for {job_id} is corrupt: {e}",
+        )
+
+
+def _persist_analysis(
+    *,
+    job_id: str,
+    video_path: Path,
+    trim_dir: Path,
+    result: dict[str, Any],
+    ball_flight: dict[str, Any] | None,
+) -> None:
+    """Save one completed analysis to the analyses table for Swing History.
+
+    Paths are stored relative to the repo root so the DB stays portable if
+    the project ever moves. The whole result dict is stored as JSON so the
+    history detail view can rehydrate the exact payload the user saw.
+    """
+    _ensure_db(_CFG.db_path)
+
+    # Look up the paired shot's row id so the FK is meaningful. ball_flight
+    # as returned by latest_ball_flight() is a subset of columns; the row
+    # id has to come from a separate query.
+    shot_id: int | None = None
+    if ball_flight is not None:
+        with _db_connect(_CFG.db_path) as conn:
+            row = conn.execute(
+                "SELECT id FROM shots WHERE captured_at = ? ORDER BY id DESC LIMIT 1",
+                (ball_flight.get("captured_at"),),
+            ).fetchone()
+            if row is not None:
+                shot_id = int(row[0])
+
+    # Make the stored paths repo-root-relative for portability, but fall
+    # back to absolute if the artifact sat somewhere unexpected.
+    def _rel(p: Path) -> str:
+        try:
+            return str(p.resolve().relative_to(_REPO_ROOT.resolve()))
+        except ValueError:
+            return str(p.resolve())
+
+    with _db_connect(_CFG.db_path) as conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO analyses
+              (job_id, shot_id, video_path, trim_dir, result_json)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                job_id,
+                shot_id,
+                _rel(video_path),
+                _rel(trim_dir),
+                json.dumps(result),
+            ),
+        )
+        conn.commit()
 
 
 def _bridge_state_dict() -> dict[str, Any]:

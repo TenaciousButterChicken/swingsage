@@ -2,9 +2,10 @@ import BridgeStatusChip from "./BridgeStatusChip";
 
 interface BrandProps {
   onReset?: () => void;
+  onHistory?: () => void;
 }
 
-export default function Brand({ onReset }: BrandProps) {
+export default function Brand({ onReset, onHistory }: BrandProps) {
   return (
     <div className="flex items-center justify-between">
       <button
@@ -21,11 +22,21 @@ export default function Brand({ onReset }: BrandProps) {
         </div>
       </button>
 
-      <div className="hidden items-center gap-3 md:flex">
-        <BridgeStatusChip />
-        <span className="label-eyebrow">Runtime</span>
-        <Pill label="RTX 5080" />
-        <Pill label="Qwen 3 14B" />
+      <div className="flex items-center gap-3">
+        {onHistory && (
+          <button
+            onClick={onHistory}
+            className="rounded-full hairline bg-ink-800/60 px-3.5 py-1.5 font-mono text-[10px] uppercase tracking-widest text-ink-200 transition-colors hover:bg-ink-800 hover:text-ink-100"
+          >
+            Swing history
+          </button>
+        )}
+        <div className="hidden items-center gap-3 md:flex">
+          <BridgeStatusChip />
+          <span className="label-eyebrow">Runtime</span>
+          <Pill label="RTX 5080" />
+          <Pill label="Qwen 3 14B" />
+        </div>
       </div>
     </div>
   );

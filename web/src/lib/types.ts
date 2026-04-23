@@ -124,6 +124,20 @@ export interface BridgeStatus {
   error: string | null;
 }
 
+// History list item — returned by GET /api/history. The full result
+// payload is fetched separately via GET /api/analysis/{job_id} when the
+// user clicks into a row, keeping the list lightweight.
+export interface HistoryItem {
+  job_id: string;
+  created_at: string;
+  thumbnail: string | null;
+  has_ball_flight: boolean;
+  shoulder_turn_deg: number | null;
+  x_factor_deg: number | null;
+  elapsed_seconds: number | null;
+  faults: string[];
+}
+
 export interface AnalysisResult {
   elapsed_seconds: number;
   fps: number;
