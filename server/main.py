@@ -561,6 +561,65 @@ async def history() -> dict[str, Any]:
     return {"items": items}
 
 
+def _safe_under_captures(p: Path) -> bool:
+    """True if `p` resolves to a path inside the repo's captures/ folder.
+
+    Paths stored in the DB come from us writing to captures/<video>_trim/,
+    but we still verify before deleting — cheap insurance against a
+    malformed DB row accidentally pointing at something important.
+    """
+    try:
+        p.resolve().relative_to(CAPTURES_DIR.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+@app.delete("/api/analysis/{job_id}")
+async def delete_analysis(job_id: str) -> dict[str, Any]:
+    """Remove one analysis from history. Deletes the DB row and, on a
+    best-effort basis, the uploaded video and the trim-artifact directory
+    so local disk doesn't keep growing forever."""
+    import shutil
+
+    _ensure_db(_CFG.db_path)
+    with _db_connect(_CFG.db_path) as conn:
+        row = conn.execute(
+            "SELECT video_path, trim_dir FROM analyses WHERE job_id = ?",
+            (job_id,),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail=f"No saved analysis for {job_id}")
+
+        video_rel = row["video_path"]
+        trim_rel = row["trim_dir"]
+
+        conn.execute("DELETE FROM analyses WHERE job_id = ?", (job_id,))
+        conn.commit()
+
+    # Drop the in-memory job too (if the just-deleted analysis is still in
+    # the current session), so a stale pointer doesn't keep serving it.
+    jobs.pop(job_id, None)
+
+    # Best-effort artifact cleanup. Failures here don't undo the DB delete.
+    artifacts_removed: list[str] = []
+    for rel in filter(None, (video_rel, trim_rel)):
+        p = (_REPO_ROOT / rel).resolve() if not Path(rel).is_absolute() else Path(rel).resolve()
+        if not _safe_under_captures(p):
+            continue
+        try:
+            if p.is_dir():
+                shutil.rmtree(p, ignore_errors=True)
+                artifacts_removed.append(str(p))
+            elif p.is_file():
+                p.unlink(missing_ok=True)
+                artifacts_removed.append(str(p))
+        except OSError:
+            pass
+
+    return {"job_id": job_id, "deleted": True, "artifacts_removed": artifacts_removed}
+
+
 @app.get("/api/analysis/{job_id}")
 async def analysis_by_id(job_id: str) -> dict[str, Any]:
     """Rehydrate a past analysis by job_id. Returns the full result payload

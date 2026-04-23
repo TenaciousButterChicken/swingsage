@@ -61,3 +61,11 @@ export async function getAnalysis(jobId: string): Promise<AnalysisResult> {
   }
   return res.json();
 }
+
+export async function deleteAnalysis(jobId: string): Promise<void> {
+  const res = await fetch(`/api/analysis/${jobId}`, { method: "DELETE" });
+  if (!res.ok) {
+    const txt = await res.text();
+    throw new Error(`Delete failed (${res.status}): ${txt}`);
+  }
+}
