@@ -87,10 +87,19 @@ export interface Artifacts {
   };
 }
 
+export interface TrimInfo {
+  used_fallback: boolean;
+  confidence: number;
+  window_start: number;
+  window_end: number;
+  window_seconds: number;
+}
+
 export interface AnalysisResult {
   elapsed_seconds: number;
   fps: number;
   total_frames: number;
+  trim: TrimInfo;
   artifacts: Artifacts;
   swingnet_events: SwingNetEvent[];
   metrics: Metrics;

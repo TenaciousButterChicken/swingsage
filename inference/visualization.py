@@ -16,6 +16,7 @@ import cv2
 import numpy as np
 
 from inference.pose_3d import FramePose
+from inference.video_io import write_browser_mp4
 
 # SMPL 24-joint skeleton edges — the body parts of interest for golf. Uses
 # the same joint-index convention as pose_3d.SMPL_JOINT_NAMES:
@@ -88,17 +89,14 @@ def render_pose_overlay_video(
     """
     if not bgr_frames:
         return None
-    out_path = Path(out_path)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    h, w = bgr_frames[0].shape[:2]
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    writer = cv2.VideoWriter(str(out_path), fourcc, fps, (w, h))
-    try:
-        for frame, pose in zip(bgr_frames, poses):
-            canvas = frame.copy()
-            _draw_skeleton(canvas, pose)
-            writer.write(canvas)
-    finally:
-        writer.release()
-    return out_path
+    # Build the overlaid frames in memory, then hand off to the H.264 writer.
+    # Memory cost is one extra copy of the window (~4 s × source resolution) —
+    # negligible next to NLF's working set, and trivial compared to the
+    # alternative (a temp mp4v file re-encoded through ffmpeg).
+    overlaid: list[np.ndarray] = []
+    for frame, pose in zip(bgr_frames, poses):
+        canvas = frame.copy()
+        _draw_skeleton(canvas, pose)
+        overlaid.append(canvas)
+    return write_browser_mp4(overlaid, out_path, fps)
