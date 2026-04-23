@@ -155,7 +155,31 @@ SWINGSAGE_LLM_API_BASE=http://127.0.0.1:1234/v1
 `openai>=1.50` is installed by the coach module's one-shot install; add
 it to `requirements-prod-windows.txt` on the next sweep.
 
-## Phase 2 pipeline — run it
+## Phase 2 web app — run it
+
+The full stack is a FastAPI server (`server/`) and a Vite + React frontend
+(`web/`). Two terminals.
+
+```powershell
+# Terminal 1 — backend (wraps the pipeline; serves /captures static files)
+.\.venv\Scripts\python.exe -m uvicorn server.main:app --host 127.0.0.1 --port 8000
+
+# Terminal 2 — frontend dev server (auto-proxies /api and /captures to 127.0.0.1:8000)
+cd web
+npm install   # first run only
+npm run dev
+```
+
+Open http://127.0.0.1:5173. Drop a swing video onto the upload card, hit
+Analyse. Processing is ~60 s on RTX 5080 (~45 s is the NLF pose pass;
+3 s is Qwen). The Results view has the trimmed video, keyframe gallery,
+metric dashboard with color-coded ranges, and Qwen's coaching panel.
+
+Phone access: the Vite config binds to `0.0.0.0`, so `http://<pc-ip>:5173`
+works from any device on the same wifi. LM Studio must already be running
+with Qwen 3 14B loaded — see the "LM Studio + Qwen 3 14B" section above.
+
+## Phase 2 pipeline — run it via CLI
 
 ```powershell
 .\.venv\Scripts\python.exe scripts\analyze_swing.py third_party\golfdb\test_video.mp4
